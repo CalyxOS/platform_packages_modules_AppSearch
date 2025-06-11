@@ -16,7 +16,7 @@
 
 package com.android.server.appsearch.external.localstorage.converter;
 
-import android.annotation.NonNull;
+import android.app.appsearch.FeatureConstants;
 import android.app.appsearch.SearchSuggestionSpec;
 
 import com.android.server.appsearch.external.localstorage.NamespaceCache;
@@ -27,6 +27,8 @@ import com.google.android.icing.proto.SuggestionScoringSpecProto;
 import com.google.android.icing.proto.SuggestionSpecProto;
 import com.google.android.icing.proto.TermMatchType;
 import com.google.android.icing.proto.TypePropertyMask;
+
+import org.jspecify.annotations.NonNull;
 
 import java.util.List;
 import java.util.Map;
@@ -96,8 +98,7 @@ public final class SearchSuggestionSpecToProtoConverter {
     }
 
     /** Extracts {@link SuggestionSpecProto} information from a {@link SearchSuggestionSpec}. */
-    @NonNull
-    public SuggestionSpecProto toSearchSuggestionSpecProto() {
+    public @NonNull SuggestionSpecProto toSearchSuggestionSpecProto() {
         // Set query suggestion prefix to the SearchSuggestionProto and override schema and
         // namespace filter by targetPrefixedFilters which contains all existing and also
         // accessible to the caller filters.
@@ -106,9 +107,21 @@ public final class SearchSuggestionSpecToProtoConverter {
                         .setPrefix(mSuggestionQueryExpression)
                         .addAllNamespaceFilters(mTargetPrefixedNamespaceFilters)
                         .addAllSchemaTypeFilters(mTargetPrefixedSchemaFilters)
-                        .setNumToReturn(mSearchSuggestionSpec.getMaximumResultCount())
-                        .addAllQueryParameterStrings(
-                                mSearchSuggestionSpec.getSearchStringParameters());
+                        .setNumToReturn(mSearchSuggestionSpec.getMaximumResultCount());
+
+        if (!mSearchSuggestionSpec.getSearchStringParameters().isEmpty()) {
+            protoBuilder.addAllQueryParameterStrings(
+                    mSearchSuggestionSpec.getSearchStringParameters());
+            // When the SearchSuggestions api first launched, it did not include the various "set
+            // feature enabled" apis that {@link SearchSpec} has.
+            //
+            // Search string parameters necessarily invokes the LIST_FILTER_QUERY_LANGUAGE feature
+            // because they are referenced in the query expression through a function call.
+            // To avoid errors about using un-enabled query features, we add it here. This is safe
+            // to do because search string parameters were added after the
+            // LIST_FILTER_QUERY_LANGUAGE.
+            protoBuilder.addEnabledFeatures(FeatureConstants.LIST_FILTER_QUERY_LANGUAGE);
+        }
 
         // Convert type property filter map into type property mask proto.
         for (Map.Entry<String, List<String>> entry :

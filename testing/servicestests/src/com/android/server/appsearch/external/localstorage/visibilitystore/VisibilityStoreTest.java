@@ -74,6 +74,7 @@ public class VisibilityStoreTest {
                         /* initStatsBuilder= */ null,
                         /* visibilityChecker= */ null,
                         /* revocableFileDescriptorStore= */ null,
+                        /* icingSearchEngine= */ null,
                         ALWAYS_OPTIMIZE);
         mVisibilityStore = VisibilityStore.createDocumentVisibilityStore(mAppSearchImpl);
     }
@@ -278,6 +279,7 @@ public class VisibilityStoreTest {
     }
 
     @Test
+    @SuppressWarnings("deprecation") // AppSearchImpl.putDocument
     public void testSetVisibility_avoidRemoveOverlay() throws Exception {
         // Set a visibility config w/o overlay
         InternalVisibilityConfig visibilityConfig =

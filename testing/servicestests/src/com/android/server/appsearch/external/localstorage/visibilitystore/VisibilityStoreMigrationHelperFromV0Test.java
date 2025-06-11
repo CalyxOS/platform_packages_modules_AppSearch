@@ -70,6 +70,7 @@ public class VisibilityStoreMigrationHelperFromV0Test {
     }
 
     @Test
+    @SuppressWarnings("deprecation") // AppSearchImpl.putDocument
     public void testVisibilityMigration_from0() throws Exception {
         // Values for a "foo" client
         String packageNameFoo = "packageFoo";
@@ -153,6 +154,7 @@ public class VisibilityStoreMigrationHelperFromV0Test {
                         /* initStatsBuilder= */ null,
                         /* visibilityChecker= */ null,
                         /* revocableFileDescriptorStore= */ null,
+                        /* icingSearchEngine= */ null,
                         ALWAYS_OPTIMIZE);
 
         GenericDocument actualDocument1 =
@@ -247,6 +249,7 @@ public class VisibilityStoreMigrationHelperFromV0Test {
                         /* initStatsBuilder= */ null,
                         /* visibilityChecker= */ null,
                         /* revocableFileDescriptorStore= */ null,
+                        /* icingSearchEngine= */ null,
                         ALWAYS_OPTIMIZE);
         InternalSetSchemaResponse internalSetSchemaResponse =
                 appSearchImpl.setSchema(

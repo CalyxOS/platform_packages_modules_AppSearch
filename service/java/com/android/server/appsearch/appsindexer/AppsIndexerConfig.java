@@ -16,6 +16,8 @@
 
 package com.android.server.appsearch.appsindexer;
 
+import android.app.appsearch.AppSearchSession;
+
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -31,13 +33,27 @@ public interface AppsIndexerConfig {
     long DEFAULT_APPS_UPDATE_INTERVAL_MILLIS = TimeUnit.DAYS.toMillis(30); // 30 days.
 
     /** The default maximum number of app functions per package that the app indexer will index. */
-    int DEFAULT_MAX_APP_FUNCTIONS_PER_PACKAGE = 500;
+    int DEFAULT_MAX_APP_FUNCTIONS_PER_PACKAGE = 250;
 
     /**
      * The default maximum number of app function schemas per package that the app indexer will
      * index.
      */
-    int DEFAULT_MAX_ALLOWED_APP_FUNCTION_SCHEMAS_PER_PACKAGE = 5;
+    int DEFAULT_MAX_ALLOWED_APP_FUNCTION_SCHEMAS_PER_PACKAGE = 20;
+
+    /**
+     * The default max allowed size of an app function document.
+     *
+     * <p>More conservative than one enforced by {@link AppSearchSession#put} to prevent app
+     * developers from indexing additional properties in app function documents using this indexer.
+     */
+    int DEFAULT_MAX_ALLOWED_APP_FUNCTION_DOC_SIZE_IN_BYTES = 4 * 1024; // 4KiB
+
+    /**
+     * The default minimum time required to wait before attempting a firstRun sync after a previous
+     * firstRun sync.
+     */
+    long DEFAULT_MIN_TIME_BETWEEN_FIRST_SYNCS_MILLIS = TimeUnit.HOURS.toMillis(4);
 
     /** Returns whether Apps Indexer is enabled. */
     boolean isAppsIndexerEnabled();
@@ -50,4 +66,10 @@ public interface AppsIndexerConfig {
 
     /** Returns the max number of app function schemas the app indexer will index per package. */
     int getMaxAllowedAppFunctionSchemasPerPackage();
+
+    /**
+     * Returns the minimum time required to wait before attempting a firstRun sync after a previous
+     * firstRun sync in milliseconds.
+     */
+    long getMinTimeBetweenFirstSyncsMillis();
 }

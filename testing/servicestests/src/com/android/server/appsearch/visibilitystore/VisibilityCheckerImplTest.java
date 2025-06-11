@@ -17,7 +17,6 @@
 package com.android.server.appsearch.visibilitystore;
 
 import static android.Manifest.permission.EXECUTE_APP_FUNCTIONS;
-import static android.Manifest.permission.EXECUTE_APP_FUNCTIONS_TRUSTED;
 import static android.Manifest.permission.PACKAGE_USAGE_STATS;
 import static android.Manifest.permission.READ_ASSISTANT_APP_SEARCH_DATA;
 import static android.Manifest.permission.READ_CALENDAR;
@@ -44,14 +43,13 @@ import android.app.appsearch.InternalVisibilityConfig;
 import android.app.appsearch.PackageIdentifier;
 import android.app.appsearch.SetSchemaRequest;
 import android.app.appsearch.aidl.AppSearchAttributionSource;
+import android.app.appsearch.testutil.AppSearchTestUtils;
 import android.app.appsearch.testutil.FakeAppSearchConfig;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.pm.PackageManager;
 import android.os.UserHandle;
 import android.platform.test.annotations.RequiresFlagsEnabled;
-import android.platform.test.flag.junit.CheckFlagsRule;
-import android.platform.test.flag.junit.DeviceFlagsValueProvider;
 import android.util.ArrayMap;
 
 import androidx.test.core.app.ApplicationProvider;
@@ -69,6 +67,7 @@ import com.google.common.collect.ImmutableSet;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.RuleChain;
 import org.junit.rules.TemporaryFolder;
 import org.mockito.Mockito;
 
@@ -89,8 +88,7 @@ public class VisibilityCheckerImplTest {
     private static final int SET_SCHEMA_REQUEST_EXECUTE_APP_FUNCTIONS_TRUSTED = 10;
     private static final int SET_SCHEMA_REQUEST_PACKAGE_USAGE_STATS = 11;
 
-    @Rule
-    public final CheckFlagsRule mCheckFlagsRule = DeviceFlagsValueProvider.createCheckFlagsRule();
+    @Rule public final RuleChain mRuleChain = AppSearchTestUtils.createCommonTestRules();
 
     @Rule public TemporaryFolder mTemporaryFolder = new TemporaryFolder();
     private final Map<UserHandle, PackageManager> mMockPackageManagers = new ArrayMap<>();
@@ -132,6 +130,7 @@ public class VisibilityCheckerImplTest {
                         /* initStatsBuilder= */ null,
                         mVisibilityChecker,
                         /* revocableFileDescriptorStore= */ null,
+                        /* icingSearchEngine= */ null,
                         ALWAYS_OPTIMIZE);
         mVisibilityStore = VisibilityStore.createDocumentVisibilityStore(appSearchImpl);
     }
@@ -621,14 +620,11 @@ public class VisibilityCheckerImplTest {
     public void testSetSchema_visibleToAppFunctionsPermissions() throws Exception {
         String prefix = PrefixUtil.createPrefix("package", "database");
 
-        // Create a VDoc that require either EXECUTE_APP_FUNCTIONS or EXECUTE_APP_FUNCTIONS_TRUSTED
-        // permissions only.
+        // Create a VDoc that require either EXECUTE_APP_FUNCTIONS permissions only.
         InternalVisibilityConfig visibilityConfig =
                 new InternalVisibilityConfig.Builder(/* id= */ prefix + "Schema")
                         .addVisibleToPermissions(
                                 ImmutableSet.of(SET_SCHEMA_REQUEST_EXECUTE_APP_FUNCTIONS))
-                        .addVisibleToPermissions(
-                                ImmutableSet.of(SET_SCHEMA_REQUEST_EXECUTE_APP_FUNCTIONS_TRUSTED))
                         .build();
         mVisibilityStore.setVisibility(ImmutableList.of(visibilityConfig));
 
@@ -646,12 +642,6 @@ public class VisibilityCheckerImplTest {
                                 prefix + "Schema",
                                 mVisibilityStore))
                 .isTrue();
-        // Grant the EXECUTE_APP_FUNCTIONS_TRUSTED permission along with EXECUTE_APP_FUNCTIONS, we
-        // should still be able to access.
-        doReturn(true)
-                .when(mVisibilityChecker)
-                .checkPermissionForDataDeliveryGranted(
-                        eq(EXECUTE_APP_FUNCTIONS_TRUSTED), any(), any());
         assertThat(
                         mVisibilityChecker.isSchemaSearchableByCaller(
                                 new FrameworkCallerAccess(
@@ -662,8 +652,7 @@ public class VisibilityCheckerImplTest {
                                 prefix + "Schema",
                                 mVisibilityStore))
                 .isTrue();
-        // Drop the EXECUTE_APP_FUNCTIONS permission so only EXECUTE_APP_FUNCTIONS_TRUSTED is held,
-        // we should still be able to access.
+        // Ungrant the EXECUTE_APP_FUNCTIONS permsision. Can no longer access.
         doReturn(false)
                 .when(mVisibilityChecker)
                 .checkPermissionForDataDeliveryGranted(eq(EXECUTE_APP_FUNCTIONS), any(), any());
@@ -676,12 +665,23 @@ public class VisibilityCheckerImplTest {
                                 "package",
                                 prefix + "Schema",
                                 mVisibilityStore))
-                .isTrue();
-        // Drop both permissions, it becomes invisible.
-        doReturn(false)
-                .when(mVisibilityChecker)
-                .checkPermissionForDataDeliveryGranted(
-                        eq(EXECUTE_APP_FUNCTIONS_TRUSTED), any(), any());
+                .isFalse();
+    }
+
+    @Test
+    @RequiresFlagsEnabled(FLAG_ENABLE_APP_FUNCTION_MANAGER)
+    public void testSetSchema_executeAppFunctionsTrusted() throws Exception {
+        String prefix = PrefixUtil.createPrefix("package", "database");
+
+        // Create a VDoc that require either EXECUTE_APP_FUNCTIONS_TRUSTED permissions only.
+        InternalVisibilityConfig visibilityConfig =
+                new InternalVisibilityConfig.Builder(/* id= */ prefix + "Schema")
+                        .addVisibleToPermissions(
+                                ImmutableSet.of(SET_SCHEMA_REQUEST_EXECUTE_APP_FUNCTIONS_TRUSTED))
+                        .build();
+        mVisibilityStore.setVisibility(ImmutableList.of(visibilityConfig));
+
+        // The permission is deprecated and so the check should always return false (without crash).
         assertThat(
                         mVisibilityChecker.isSchemaSearchableByCaller(
                                 new FrameworkCallerAccess(

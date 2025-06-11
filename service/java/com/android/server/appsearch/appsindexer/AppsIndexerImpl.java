@@ -20,6 +20,7 @@ import android.annotation.NonNull;
 import android.annotation.WorkerThread;
 import android.app.appsearch.AppSearchBatchResult;
 import android.app.appsearch.AppSearchResult;
+import android.app.appsearch.AppSearchSchema;
 import android.app.appsearch.GenericDocument;
 import android.app.appsearch.PackageIdentifier;
 import android.app.appsearch.exceptions.AppSearchException;
@@ -30,8 +31,11 @@ import android.os.SystemClock;
 import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.Log;
+import android.util.Pair;
 
+import com.android.appsearch.flags.Flags;
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.server.appsearch.appsindexer.appsearchtypes.AppFunctionDocument;
 import com.android.server.appsearch.appsindexer.appsearchtypes.AppFunctionStaticMetadata;
 import com.android.server.appsearch.appsindexer.appsearchtypes.MobileApplication;
 
@@ -74,11 +78,15 @@ public final class AppsIndexerImpl implements Closeable {
      *     updated.
      * @param appsUpdateStats contains stats about the apps indexer update. This method will
      *     populate the fields of this {@link AppsUpdateStats} structure.
+     * @param isFullUpdateRequired whether to re-index all apps irrespective of their last update
+     *     timestamp.
      */
     @VisibleForTesting
     @WorkerThread
     public void doUpdateIncrementalPut(
-            @NonNull AppsIndexerSettings settings, @NonNull AppsUpdateStats appsUpdateStats)
+            @NonNull AppsIndexerSettings settings,
+            @NonNull AppsUpdateStats appsUpdateStats,
+            boolean isFullUpdateRequired)
             throws AppSearchException {
         // TODO(b/357551503): Add metrics for app function indexing
         Objects.requireNonNull(settings);
@@ -99,7 +107,7 @@ public final class AppsIndexerImpl implements Closeable {
         appsUpdateStats.mPackageManagerLatencyMillis =
                 SystemClock.elapsedRealtime() - beforePackageManagerTimestamp;
 
-        List<AppFunctionStaticMetadata> functionsToAddOrUpdate = new ArrayList<>();
+        List<AppFunctionDocument> functionDocumentsToAddOrUpdate = new ArrayList<>();
         // To remove, we only need the id
         Set<String> functionIdsToRemove = new ArraySet<>();
 
@@ -122,7 +130,7 @@ public final class AppsIndexerImpl implements Closeable {
         // for removed packages, as we can just remove the entire MobileApplication +
         // AppFunctionStaticMetadata schemas, which will in turn remove the documents.
         Map<PackageInfo, ResolveInfos> packagesToBeAddedOrUpdated = new ArrayMap<>();
-        List<String> updatedPackageIds = new ArrayList<>();
+        Set<String> updatedPackageIds = new ArraySet<>();
 
         // First loop, determine the status of apps
         for (Map.Entry<PackageInfo, ResolveInfos> packageEntry : packagesToIndex.entrySet()) {
@@ -141,9 +149,10 @@ public final class AppsIndexerImpl implements Closeable {
                 addedOrRemovedFlag = true;
                 appsUpdateStats.mNumberOfAppsAdded++;
                 packagesToBeAddedOrUpdated.put(packageInfo, packageEntry.getValue());
-            } else if (packageInfo.lastUpdateTime > storedAppUpdateTime) {
-                // Package updated. Add this to the list of updated apps so we can check what
-                // functions are indexed in AppSearch
+            } else if (packageInfo.lastUpdateTime != storedAppUpdateTime || isFullUpdateRequired) {
+                // Package last update timestamp discrepancy between AppSearch and PackageManager
+                // or app indexer code was updated. Add this to the list of updated
+                // apps so we can check what functions are indexed in AppSearch
                 appsUpdateStats.mNumberOfAppsUpdated++;
                 updatedPackageIds.add(packageInfo.packageName);
                 packagesToBeAddedOrUpdated.put(packageInfo, packagesToIndex.get(packageInfo));
@@ -164,32 +173,44 @@ public final class AppsIndexerImpl implements Closeable {
             }
         }
 
+        Map<String, Map<String, AppSearchSchema>> dynamicAppFunctionSchemasForPackages = null;
+        if (Flags.enableAppFunctionsSchemaParser()) {
+            // TODO(b/382254638): Skip XML parsing for packages that were not updated by using
+            // AppSearchSessio#getSchema.
+            dynamicAppFunctionSchemasForPackages =
+                    AppsUtil.getDynamicAppFunctionSchemasForPackages(
+                            packageManager,
+                            packagesToIndex,
+                            mAppsIndexerConfig.getMaxAllowedAppFunctionSchemasPerPackage());
+        }
+
         // Parse and build all necessary AppFunctionStaticMetadata from PackageManager.
-        Map<String, Map<String, AppFunctionStaticMetadata>>
+        Map<String, Map<String, ? extends AppFunctionDocument>>
                 currentAppFunctionsForAddedUpdatedPackages =
-                        AppsUtil.buildAppFunctionStaticMetadataIntoMap(
+                        AppsUtil.buildAppFunctionDocumentsIntoMap(
                                 packageManager,
                                 packagesToBeAddedOrUpdated,
                                 /* indexerPackageName= */ mContext.getPackageName(),
-                                mAppsIndexerConfig.getMaxAppFunctionsPerPackage());
+                                mAppsIndexerConfig,
+                                dynamicAppFunctionSchemasForPackages);
 
         // Get all currently indexed AppFunctionStaticMetadata docs for the necessary packages.
-        Map<String, Map<String, AppFunctionStaticMetadata>> appFunctionsFromAppSearch =
-                mAppSearchHelper.getAppFunctionsFromAppSearch(updatedPackageIds);
+        Map<String, Map<String, AppFunctionDocument>> appFunctionsFromAppSearch =
+                mAppSearchHelper.getAppFunctionDocumentsFromAppSearch(updatedPackageIds);
 
-        for (Map.Entry<String, Map<String, AppFunctionStaticMetadata>> packageEntry :
+        for (Map.Entry<String, Map<String, ? extends AppFunctionDocument>> packageEntry :
                 currentAppFunctionsForAddedUpdatedPackages.entrySet()) {
             String packageName = packageEntry.getKey();
-            Map<String, AppFunctionStaticMetadata> currentAppFunctionsPerApp =
+            Map<String, ? extends AppFunctionDocument> currentAppFunctionsPerApp =
                     packageEntry.getValue();
 
             // This might be null, in the case of functions newly added to a package
-            Map<String, AppFunctionStaticMetadata> appSearchAppFunctionsPerApp =
+            Map<String, AppFunctionDocument> appSearchAppFunctionsPerApp =
                     appFunctionsFromAppSearch.get(packageName);
 
             if (appSearchAppFunctionsPerApp == null && !currentAppFunctionsPerApp.isEmpty()) {
                 // Functions added to an app that didn't have them
-                functionsToAddOrUpdate.addAll(currentAppFunctionsPerApp.values());
+                functionDocumentsToAddOrUpdate.addAll(currentAppFunctionsPerApp.values());
                 addedOrRemovedFlag = true;
             }
 
@@ -199,55 +220,63 @@ public final class AppsIndexerImpl implements Closeable {
                     addedOrRemovedFlag = true;
                 } else {
                     // App updated that had packages, we should check
-                    comparePackageFunctions(
+                    comparePackageFunctionDocuments(
                             currentAppFunctionsPerApp,
                             appSearchAppFunctionsPerApp,
-                            functionsToAddOrUpdate,
+                            functionDocumentsToAddOrUpdate,
                             functionIdsToRemove);
                 }
             }
         }
 
         try {
-            if (addedOrRemovedFlag) {
-                // This boolean will be turned on if we need to call setSchema to keep AppSearch in
-                // sync with PackageManager.
-                List<PackageIdentifier> packageIdentifiers = new ArrayList<>();
-                List<PackageIdentifier> packageIdentifiersWithAppFunctions = new ArrayList<>();
+            // TODO(b/382254638): Skip set schema calls if no packages have an updated schema.
+            if (dynamicAppFunctionSchemasForPackages != null) {
+                // Since dynamic schemas are enabled, we need to account for schema changes in
+                // both updated packages and newly added packages.
+                Pair<List<PackageIdentifier>, List<PackageIdentifier>>
+                        mobileAppAndAppFunctionIdentifiers =
+                                getPackageIdentifiers(
+                                        packagesToIndex,
+                                        currentAppFunctionsForAddedUpdatedPackages);
 
-                for (Map.Entry<PackageInfo, ResolveInfos> entry : packagesToIndex.entrySet()) {
-                    // We get certificates here as getting the certificates during the previous for
-                    // loop would be wasteful if we end up not needing to call set schema
-                    PackageInfo packageInfo = entry.getKey();
-                    byte[] certificate = AppsUtil.getCertificate(packageInfo);
-                    if (certificate == null) {
-                        Log.e(TAG, "Certificate not found for package: " + packageInfo.packageName);
-                        continue;
-                    }
-                    PackageIdentifier packageIdentifier =
-                            new PackageIdentifier(packageInfo.packageName, certificate);
-                    packageIdentifiers.add(packageIdentifier);
-                    if (entry.getValue().getAppFunctionServiceInfo() != null) {
-                        packageIdentifiersWithAppFunctions.add(packageIdentifier);
-                    }
-                }
+                long beforeSetSchemaTimestamp = SystemClock.elapsedRealtime();
+                mAppSearchHelper.setSchemasForPackages(
+                        /* mobileAppPkgs= */ mobileAppAndAppFunctionIdentifiers.first,
+                        /* appFunctionPkgs= */ mobileAppAndAppFunctionIdentifiers.second,
+                        dynamicAppFunctionSchemasForPackages);
+                appsUpdateStats.mAppSearchSetSchemaLatencyMillis =
+                        SystemClock.elapsedRealtime() - beforeSetSchemaTimestamp;
+            } else if (addedOrRemovedFlag) {
+                // This branch is executed when dynamic schemas are disabled and new packages are
+                // added or removed to keep the AppSearch schema in sync with
+                // PackageManager.
+                Pair<List<PackageIdentifier>, List<PackageIdentifier>>
+                        mobileAppAndAppFunctionIdentifiers =
+                                getPackageIdentifiers(
+                                        packagesToIndex,
+                                        currentAppFunctionsForAddedUpdatedPackages);
+
                 // The certificate is necessary along with the package name as it is used in
                 // visibility settings.
                 long beforeSetSchemaTimestamp = SystemClock.elapsedRealtime();
                 mAppSearchHelper.setSchemasForPackages(
-                        packageIdentifiers, packageIdentifiersWithAppFunctions);
+                        /* mobileAppPkgs= */ mobileAppAndAppFunctionIdentifiers.first,
+                        /* appFunctionPkgs= */ mobileAppAndAppFunctionIdentifiers.second);
                 appsUpdateStats.mAppSearchSetSchemaLatencyMillis =
                         SystemClock.elapsedRealtime() - beforeSetSchemaTimestamp;
             }
 
-            if (!packagesToBeAddedOrUpdated.isEmpty() || !functionsToAddOrUpdate.isEmpty()) {
+            if (!packagesToBeAddedOrUpdated.isEmpty()
+                    || !functionDocumentsToAddOrUpdate.isEmpty()) {
                 long beforePutTimestamp = SystemClock.elapsedRealtime();
                 List<MobileApplication> mobileApplications =
                         AppsUtil.buildAppsFromPackageInfos(
                                 packageManager, packagesToBeAddedOrUpdated);
 
                 AppSearchBatchResult<String, Void> result =
-                        mAppSearchHelper.indexApps(mobileApplications, functionsToAddOrUpdate);
+                        mAppSearchHelper.indexApps(
+                                mobileApplications, functionDocumentsToAddOrUpdate);
                 if (result.isSuccess()) {
                     appsUpdateStats.mUpdateStatusCodes.add(AppSearchResult.RESULT_OK);
                 } else {
@@ -284,71 +313,141 @@ public final class AppsIndexerImpl implements Closeable {
     }
 
     /**
-     * Compares the app functions in PackageManager vs those in AppSearch, and updates
-     * functionsToAddOrUpdate and functionIdsToRemove accordingly.
+     * Return a pair of lists of {@link PackageIdentifier}s, the first list representing all
+     * packages, and the second list representing packages with app functions.
      *
-     * @param currentAppFunctionsPerApp the mapping of function ids to documents corresponding to
-     *     what is in the apps metadata.
-     * @param appSearchAppFunctionsPerApp the mapping of function ids to documents corresponding to
-     *     what is in AppSearch
-     * @param functionsToAddOrUpdate the List of {@link GenericDocument} that will be sent to a put
-     *     call to AppSearch
-     * @param functionIdsToRemove the set of ids that will be sent to a remove call in AppSearch
+     * <p>The second list is always a subset of the first list.
+     *
+     * @param packagesToIndex a mapping of {@link PackageInfo}s with their corresponding {@link
+     *     ResolveInfos} for the packages launch activity and maybe app function resolve info.
+     * @param currentAppFunctionsForAddedUpdatedPackages a mapping of package name to a map of all
+     *     app functions for the packages that were either updated or added.
+     * @return a pair of lists of {@link PackageIdentifier}s, the first list representing all
+     *     packages, and the second list representing packages with app functions.
      */
-    private void comparePackageFunctions(
-            @NonNull Map<String, AppFunctionStaticMetadata> currentAppFunctionsPerApp,
-            @NonNull Map<String, AppFunctionStaticMetadata> appSearchAppFunctionsPerApp,
-            @NonNull List<AppFunctionStaticMetadata> functionsToAddOrUpdate,
-            @NonNull Set<String> functionIdsToRemove) {
-        Objects.requireNonNull(currentAppFunctionsPerApp);
-        Objects.requireNonNull(appSearchAppFunctionsPerApp);
-        Objects.requireNonNull(functionsToAddOrUpdate);
-        Objects.requireNonNull(functionIdsToRemove);
+    private Pair<List<PackageIdentifier>, List<PackageIdentifier>> getPackageIdentifiers(
+            @NonNull Map<PackageInfo, ResolveInfos> packagesToIndex,
+            Map<String, Map<String, ? extends AppFunctionDocument>>
+                    currentAppFunctionsForAddedUpdatedPackages) {
+        List<PackageIdentifier> packageIdentifiers = new ArrayList<>();
+        List<PackageIdentifier> packageIdentifiersWithAppFunctions = new ArrayList<>();
+        for (Map.Entry<PackageInfo, ResolveInfos> entry : packagesToIndex.entrySet()) {
+            // We get certificates here as getting the certificates during the previous for
+            // loop would be wasteful if we end up not needing to call set schema
+            PackageInfo packageInfo = entry.getKey();
+            byte[] certificate = AppsUtil.getCertificate(packageInfo);
+            if (certificate == null) {
+                Log.e(TAG, "Certificate not found for package: " + packageInfo.packageName);
+                continue;
+            }
+            PackageIdentifier packageIdentifier =
+                    new PackageIdentifier(packageInfo.packageName, certificate);
+            packageIdentifiers.add(packageIdentifier);
+            // Check if the package was updated and all app functions were removed. The map only
+            // contains entries for packages that updated or newly added, for packages with no
+            // change we would rely solely on presence of AppFunctionServiceInfo to decide if it's
+            // an app function package.
+            boolean appFunctionsRemoved =
+                    currentAppFunctionsForAddedUpdatedPackages.containsKey(packageInfo.packageName)
+                            && currentAppFunctionsForAddedUpdatedPackages
+                                    .get(packageInfo.packageName)
+                                    .isEmpty();
+            if (entry.getValue().getAppFunctionServiceInfo() != null && !appFunctionsRemoved) {
+                packageIdentifiersWithAppFunctions.add(packageIdentifier);
+            }
+        }
+        return new Pair<>(packageIdentifiers, packageIdentifiersWithAppFunctions);
+    }
 
-        for (Map.Entry<String, AppFunctionStaticMetadata> currentFunctionEntry :
-                currentAppFunctionsPerApp.entrySet()) {
+    /**
+     * Compares the app function documents in PackageManager vs those in AppSearch, and updates
+     * functionDocumentsToAddOrUpdate and functionDocumentIdsToRemove accordingly.
+     *
+     * @param currentAppFunctionDocumentsPerApp the mapping of function ids to documents
+     *     corresponding to what is in the apps metadata.
+     * @param appSearchAppFunctionDocumentsPerApp the mapping of function ids to documents
+     *     corresponding to what is in AppSearch
+     * @param functionDocumentsToAddOrUpdate the List of {@link AppFunctionDocument} that will be
+     *     sent to a put call to AppSearch
+     * @param functionDocumentIdsToRemove the set of ids that will be sent to a remove call in
+     *     AppSearch
+     */
+    private void comparePackageFunctionDocuments(
+            @NonNull Map<String, ? extends AppFunctionDocument> currentAppFunctionDocumentsPerApp,
+            @NonNull Map<String, AppFunctionDocument> appSearchAppFunctionDocumentsPerApp,
+            @NonNull List<AppFunctionDocument> functionDocumentsToAddOrUpdate,
+            @NonNull Set<String> functionDocumentIdsToRemove) {
+        Objects.requireNonNull(currentAppFunctionDocumentsPerApp);
+        Objects.requireNonNull(appSearchAppFunctionDocumentsPerApp);
+        Objects.requireNonNull(functionDocumentsToAddOrUpdate);
+        Objects.requireNonNull(functionDocumentIdsToRemove);
+
+        for (Map.Entry<String, ? extends AppFunctionDocument> currentFunctionEntry :
+                currentAppFunctionDocumentsPerApp.entrySet()) {
             String functionId = currentFunctionEntry.getKey();
-            AppFunctionStaticMetadata currentFunction = currentFunctionEntry.getValue();
-            AppFunctionStaticMetadata appSearchFunction =
-                    appSearchAppFunctionsPerApp.get(functionId);
-            // appSearchFunction == null means it's a new function, function inequality means
-            // updated function. Both mean we need to call put with this function.
-            if (appSearchFunction == null
-                    || !areFunctionsEqual(appSearchFunction, currentFunction)) {
-                functionsToAddOrUpdate.add(currentFunction);
+            AppFunctionDocument currentFunctionDocument = currentFunctionEntry.getValue();
+            AppFunctionDocument appSearchFunctionDocument =
+                    appSearchAppFunctionDocumentsPerApp.get(functionId);
+            // appSearchFunctionDocument == null means it's a new document, document inequality
+            // means
+            // updated document. Both mean we need to call put with this document.
+            if (appSearchFunctionDocument == null
+                    || !areFunctionDocumentsEqual(
+                            appSearchFunctionDocument, currentFunctionDocument)) {
+                functionDocumentsToAddOrUpdate.add(currentFunctionDocument);
             }
         }
 
-        for (Map.Entry<String, AppFunctionStaticMetadata> appSearchFunctionEntry :
-                appSearchAppFunctionsPerApp.entrySet()) {
-            if (!currentAppFunctionsPerApp.containsKey(appSearchFunctionEntry.getKey())) {
-                functionIdsToRemove.add(appSearchFunctionEntry.getValue().getId());
+        for (Map.Entry<String, AppFunctionDocument> appSearchFunctionEntry :
+                appSearchAppFunctionDocumentsPerApp.entrySet()) {
+            if (!currentAppFunctionDocumentsPerApp.containsKey(appSearchFunctionEntry.getKey())) {
+                functionDocumentIdsToRemove.add(appSearchFunctionEntry.getValue().getId());
             }
         }
     }
 
     /**
-     * Checks if two AppFunctionMetaData documents are equal. It isn't enough to call equals. We
-     * also need to ignore creation timestamp and parent types. These are set in AppSearch, but
-     * aren't set for the "about to be indexed" docs
+     * Checks if two AppFunction documents are equal. It isn't enough to call equals. We also need
+     * to ignore creation timestamp and parent types. These are set in AppSearch, but aren't set for
+     * the "about to be indexed" docs
      *
      * @return true if the documents are equal, false otherwise.
      */
-    private boolean areFunctionsEqual(
-            @NonNull GenericDocument appSearchFunction, @NonNull GenericDocument currentFunction) {
-        Objects.requireNonNull(appSearchFunction);
-        Objects.requireNonNull(currentFunction);
-        appSearchFunction =
-                new GenericDocument.Builder<>(appSearchFunction)
+    private boolean areFunctionDocumentsEqual(
+            @NonNull GenericDocument document1, @NonNull GenericDocument document2) {
+        Objects.requireNonNull(document1);
+        Objects.requireNonNull(document2);
+
+        document1 = clearTimestampsAndParentTypesInDocument(document1);
+        document2 = clearTimestampsAndParentTypesInDocument(document2);
+
+        return document1.equals(document2);
+    }
+
+    private GenericDocument clearTimestampsAndParentTypesInDocument(
+            @NonNull GenericDocument document) {
+        GenericDocument.Builder<?> builder =
+                new GenericDocument.Builder<>(document)
                         .setCreationTimestampMillis(0)
                         // GenericDocument#PARENT_TYPES_SYNTHETIC_PROPERTY is hidden
-                        .clearProperty("$$__AppSearch__parentTypes")
-                        .build();
-        currentFunction =
-                new GenericDocument.Builder<>(currentFunction)
-                        .setCreationTimestampMillis(0)
-                        .build();
-        return appSearchFunction.equals(currentFunction);
+                        .clearProperty("$$__AppSearch__parentTypes");
+
+        for (String propertyName : document.getPropertyNames()) {
+            Object property = document.getProperty(propertyName);
+            if (property instanceof GenericDocument[] nestedDocuments) {
+                GenericDocument[] clearedNestedDocuments =
+                        new GenericDocument[nestedDocuments.length];
+
+                for (int i = 0; i < nestedDocuments.length; i++) {
+                    clearedNestedDocuments[i] =
+                            clearTimestampsAndParentTypesInDocument(nestedDocuments[i]);
+                }
+
+                builder.setPropertyDocument(propertyName, clearedNestedDocuments);
+            }
+        }
+
+        return builder.build();
     }
 
     /**
@@ -474,7 +573,7 @@ public final class AppsIndexerImpl implements Closeable {
                                 packageManager,
                                 packagesToBeAddedOrUpdated,
                                 /* indexerPackageName= */ mContext.getPackageName(),
-                                mAppsIndexerConfig.getMaxAppFunctionsPerPackage());
+                                mAppsIndexerConfig);
 
                 AppSearchBatchResult<String, Void> result =
                         mAppSearchHelper.indexApps(
@@ -524,7 +623,7 @@ public final class AppsIndexerImpl implements Closeable {
             indexedAppFunctionPackages.add(
                     appSearchAppFunctions
                             .get(i)
-                            .getPropertyString(AppFunctionStaticMetadata.PROPERTY_PACKAGE_NAME));
+                            .getPropertyString(AppFunctionDocument.PROPERTY_PACKAGE_NAME));
         }
         Set<String> currentAppFunctionPackages = getCurrentAppFunctionPackages(targetedPackages);
         return !indexedAppFunctionPackages.equals(currentAppFunctionPackages);

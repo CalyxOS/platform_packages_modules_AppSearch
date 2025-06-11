@@ -71,6 +71,7 @@ public class VisibilityStoreMigrationFromV2Test {
     }
 
     @Test
+    @SuppressWarnings("deprecation") // AppSearchImpl.putDocument
     public void testVisibilityMigration_from2() throws Exception {
         // As such, we can treat V2 documents as V3 documents when upgrading, but we need to test
         // this.
@@ -95,6 +96,7 @@ public class VisibilityStoreMigrationFromV2Test {
                         /* initStatsBuilder= */ null,
                         /* visibilityChecker= */ null,
                         /* revocableFileDescriptorStore= */ null,
+                        /* icingSearchEngine= */ null,
                         ALWAYS_OPTIMIZE);
 
         // Erase overlay schemas since it doesn't exist in released V2 schema.
@@ -176,6 +178,7 @@ public class VisibilityStoreMigrationFromV2Test {
                         /* initStatsBuilder= */ null,
                         /* visibilityChecker= */ null,
                         /* revocableFileDescriptorStore= */ null,
+                        /* icingSearchEngine= */ null,
                         ALWAYS_OPTIMIZE);
 
         InternalVisibilityConfig actualConfig =

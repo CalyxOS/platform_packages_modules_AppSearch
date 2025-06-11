@@ -18,7 +18,15 @@ package com.android.server.appsearch;
 
 import static android.text.format.DateUtils.DAY_IN_MILLIS;
 
+import com.android.appsearch.flags.Flags;
 import com.android.server.appsearch.external.localstorage.AppSearchConfig;
+import com.android.server.appsearch.isolated_storage_service.IsolatedStorageServiceManager;
+
+import com.google.android.icing.proto.PersistType;
+
+import org.jspecify.annotations.NonNull;
+
+import java.util.concurrent.TimeUnit;
 
 /**
  * An interface which exposes config flags to AppSearch.
@@ -50,9 +58,10 @@ public interface ServiceAppSearchConfig extends AppSearchConfig, AutoCloseable {
     int DEFAULT_LIMIT_CONFIG_DOCUMENT_COUNT_LIMIT_START_THRESHOLD = 2_000_000;
     int DEFAULT_LIMIT_CONFIG_MAX_SUGGESTION_COUNT = 20_000;
     int DEFAULT_BYTES_OPTIMIZE_THRESHOLD = 10 * 1024 * 1024; // 10 MiB
-    int DEFAULT_TIME_OPTIMIZE_THRESHOLD_MILLIS = 7 * 24 * 60 * 60 * 1000; // 7 days in millis
+    int DEFAULT_TIME_OPTIMIZE_THRESHOLD_MILLIS = (int) TimeUnit.DAYS.toMillis(7);
     int DEFAULT_DOC_COUNT_OPTIMIZE_THRESHOLD = 10_000;
     int DEFAULT_MIN_TIME_OPTIMIZE_THRESHOLD_MILLIS = 0;
+    int DEFAULT_FOUR_HOUR_MIN_TIME_OPTIMIZE_THRESHOLD_MILLIS = (int) TimeUnit.HOURS.toMillis(4);
     // Cached API Call Stats is disabled by default
     int DEFAULT_API_CALL_STATS_LIMIT = 0;
     boolean DEFAULT_RATE_LIMIT_ENABLED = false;
@@ -201,6 +210,32 @@ public interface ServiceAppSearchConfig extends AppSearchConfig, AutoCloseable {
      * Returns the time interval to schedule a full persist to disk back ground job in milliseconds.
      */
     long getCachedFullyPersistJobIntervalMillis();
+
+    /** Returns the memory size in bytes for isolated storage. */
+    default long getIsolatedStorageMemoryBytes() {
+        return IsolatedStorageServiceManager.DEFAULT_MEMORY_BYTES;
+    }
+
+    /**
+     * Default min time interval between consecutive optimize calls in millis if there is no value
+     * set for {@link #getCachedMinTimeOptimizeThresholdMs()} in the flag system.
+     */
+    default int defaultMinTimeOptimizeThresholdMillis() {
+        // TODO (b/385020106): figure out how to make the default 0 timeSinceLastOptimize work
+        //  with a higher threshold and return 4 hours when
+        //  Flags.enable_four_hour_min_optimize_threshold is true
+        return DEFAULT_MIN_TIME_OPTIMIZE_THRESHOLD_MILLIS;
+    }
+
+    /**
+     * Default {@code PersistType.Code} that should be used to persist common mutations such as
+     * PUTs or DELETEs.
+     */
+    default PersistType.@NonNull Code defaultLightweightPersistType() {
+        return Flags.enableRecoveryProofPersistence()
+                ? PersistType.Code.RECOVERY_PROOF
+                : PersistType.Code.LITE;
+    }
 
     /**
      * Closes this {@link AppSearchConfig}.

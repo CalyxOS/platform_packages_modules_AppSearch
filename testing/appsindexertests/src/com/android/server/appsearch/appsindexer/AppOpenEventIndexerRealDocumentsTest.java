@@ -17,6 +17,7 @@ package com.android.server.appsearch.appsindexer;
 
 import static android.Manifest.permission.OBSERVE_APP_USAGE;
 import static android.Manifest.permission.PACKAGE_USAGE_STATS;
+import static android.Manifest.permission.RECEIVE_BOOT_COMPLETED;
 
 import static com.android.server.appsearch.appsindexer.TestUtils.createFakeAppOpenEventsIndexerSession;
 import static com.android.server.appsearch.appsindexer.TestUtils.removeFakeAppOpenEventDocuments;
@@ -27,15 +28,17 @@ import android.app.UiAutomation;
 import android.app.appsearch.AppSearchEnvironmentFactory;
 import android.app.appsearch.AppSearchManager;
 import android.app.appsearch.AppSearchSessionShim;
+import android.app.appsearch.FrameworkAppSearchEnvironment;
 import android.app.appsearch.SearchResult;
 import android.app.appsearch.SearchSpec;
 import android.app.appsearch.SetSchemaRequest;
+import android.app.appsearch.testutil.AppSearchFrameworkTestUtils;
+import android.app.usage.UsageEvents;
 import android.app.usage.UsageStatsManager;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.pm.UserInfo;
-import android.os.CancellationSignal;
 import android.os.UserHandle;
 
 import androidx.test.core.app.ApplicationProvider;
@@ -46,10 +49,14 @@ import com.android.server.appsearch.appsindexer.appsearchtypes.AppOpenEvent;
 
 import junit.framework.Assert;
 
+import org.jspecify.annotations.NonNull;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
+import java.io.File;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
@@ -76,6 +83,8 @@ public class AppOpenEventIndexerRealDocumentsTest {
     protected Context mUserContext;
     protected UiAutomation mUiAutomation;
 
+    @Rule public TemporaryFolder mTemporaryFolder = new TemporaryFolder();
+
     @Before
     public void setUp() throws Exception {
         mContext = new ContextWrapper(ApplicationProvider.getApplicationContext());
@@ -86,15 +95,21 @@ public class AppOpenEventIndexerRealDocumentsTest {
         mUserContext =
                 AppSearchEnvironmentFactory.getEnvironmentInstance()
                         .createContextAsUser(mContext, mUserHandle);
-        AppOpenEventIndexerSettings appOpenEventIndexerSettings =
-                new AppOpenEventIndexerSettings(
-                        AppSearchEnvironmentFactory.getEnvironmentInstance()
-                                .getAppSearchDir(mUserContext, mUserHandle));
-        appOpenEventIndexerSettings.setLastUpdateTimestampMillis(System.currentTimeMillis());
         removeFakeAppOpenEventDocuments(mContext, Executors.newSingleThreadExecutor());
 
         mUiAutomation = InstrumentationRegistry.getInstrumentation().getUiAutomation();
-        mUiAutomation.adoptShellPermissionIdentity(PACKAGE_USAGE_STATS, OBSERVE_APP_USAGE);
+        mUiAutomation.adoptShellPermissionIdentity(
+                PACKAGE_USAGE_STATS, OBSERVE_APP_USAGE, RECEIVE_BOOT_COMPLETED);
+
+        File mAppSearchDir = mTemporaryFolder.newFolder();
+        AppSearchEnvironmentFactory.setEnvironmentInstanceForTest(
+                new FrameworkAppSearchEnvironment() {
+                    @Override
+                    public File getAppSearchDir(
+                            @NonNull Context unused, @NonNull UserHandle userHandle) {
+                        return mAppSearchDir;
+                    }
+                });
     }
 
     @After
@@ -112,6 +127,8 @@ public class AppOpenEventIndexerRealDocumentsTest {
 
     @Test
     public void testRealDocuments_check() throws Exception {
+        long testStartTimeMillis = System.currentTimeMillis();
+
         Intent launchIntent =
                 mContext.getPackageManager().getLaunchIntentForPackage(mContext.getPackageName());
         Assert.assertNotNull(launchIntent);
@@ -120,20 +137,52 @@ public class AppOpenEventIndexerRealDocumentsTest {
 
         UsageStatsManager usageStatsManager = mContext.getSystemService(UsageStatsManager.class);
 
+        boolean foundMatchingEvent = false;
+        long matchingEventTimestamp = 0;
+        long maxWaitMillis = TimeUnit.SECONDS.toMillis(10);
+        long waitStartTime = System.currentTimeMillis();
+        long sleepMillis = 100;
+
+        while (!foundMatchingEvent
+                && (System.currentTimeMillis() - waitStartTime) < maxWaitMillis) {
+            UsageEvents events =
+                    usageStatsManager.queryEvents(testStartTimeMillis, System.currentTimeMillis());
+            UsageEvents.Event event = new UsageEvents.Event();
+
+            while (events.hasNextEvent()) {
+                events.getNextEvent(event);
+                if (event.getEventType() == UsageEvents.Event.ACTIVITY_RESUMED
+                        && event.getPackageName().equals(mContext.getPackageName())
+                        && event.getTimeStamp() >= testStartTimeMillis) {
+                    foundMatchingEvent = true;
+                    matchingEventTimestamp = event.getTimeStamp();
+                    break;
+                }
+            }
+            Thread.sleep(sleepMillis);
+        }
+        // Usage stats manager does not have an observer/callback API, so we just have to wait for
+        // the event to appear.  If the test is flaky, this is likely the culprit.  Can increase the
+        // spin loop time if needed (may improve flakiness).
+        assertThat(foundMatchingEvent).isTrue();
+
         CountDownLatch latch = new CountDownLatch(1);
         AppOpenEventIndexerManagerService appOpenEventIndexerManagerService =
                 new AppOpenEventIndexerManagerService(
                         mContext, new TestAppOpenEventIndexerConfig(), latch::countDown);
+        SystemService.TargetUser targetUser = new SystemService.TargetUser(mUserInfo);
+        appOpenEventIndexerManagerService.onUserUnlocking(targetUser);
         appOpenEventIndexerManagerService.mLocalService.doUpdateForUser(
-                new SystemService.TargetUser(mUserInfo).getUserHandle(), new CancellationSignal());
+                targetUser.getUserHandle(), null);
         assertThat(latch.await(10, TimeUnit.SECONDS)).isEqualTo(true);
 
-        // Search for most recently opened app open event
+        // Search for all app open events for the package opened earlier
         SearchSpec searchSpec =
                 new SearchSpec.Builder()
                         .addFilterNamespaces(AppOpenEvent.APP_OPEN_EVENT_NAMESPACE)
                         .setOrder(SearchSpec.ORDER_DESCENDING)
                         .setRankingStrategy(SearchSpec.RANKING_STRATEGY_CREATION_TIMESTAMP)
+                        .addFilterPackageNames(mContext.getPackageName())
                         .build();
         AppSearchManager manager =
                 ApplicationProvider.getApplicationContext()
@@ -143,12 +192,9 @@ public class AppOpenEventIndexerRealDocumentsTest {
         SyncGlobalSearchSession globalSearchSession =
                 new SyncGlobalSearchSessionImpl(manager, executor);
         SyncSearchResults searchResults = globalSearchSession.search("", searchSpec);
-        List<SearchResult> results = searchResults.getNextPage();
 
-        for (int i = 0; i < results.size(); i++) {
-            assertThat(results.get(i).getGenericDocument().getSchemaType())
-                    .startsWith(AppOpenEvent.SCHEMA_TYPE);
-        }
+        List<SearchResult> results =
+                AppSearchFrameworkTestUtils.retrieveAllSearchResults(searchResults);
 
         long currentTimeMillis = System.currentTimeMillis();
         boolean hasMatchingResult = false;
@@ -169,13 +215,13 @@ public class AppOpenEventIndexerRealDocumentsTest {
             if (packageName != null
                     && timestampMillis != null
                     && mContext.getPackageName().equals(packageName)
-                    && (currentTimeMillis - timestampMillis) <= TimeUnit.SECONDS.toMillis(30)) {
+                    && (currentTimeMillis - timestampMillis) <= TimeUnit.SECONDS.toMillis(30)
+                    && timestampMillis == matchingEventTimestamp) {
                 hasMatchingResult = true;
                 break;
             }
         }
 
-        // Assert that the matching result exists
         assertThat(hasMatchingResult).isTrue();
     }
 }

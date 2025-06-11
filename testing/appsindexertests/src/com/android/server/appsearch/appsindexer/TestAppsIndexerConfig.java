@@ -36,4 +36,9 @@ public class TestAppsIndexerConfig implements AppsIndexerConfig {
     public int getMaxAllowedAppFunctionSchemasPerPackage() {
         return 5;
     }
+
+    @Override
+    public long getMinTimeBetweenFirstSyncsMillis() {
+        return 500;
+    }
 }

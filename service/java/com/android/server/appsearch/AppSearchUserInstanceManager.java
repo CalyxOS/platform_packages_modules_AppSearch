@@ -16,6 +16,8 @@
 
 package com.android.server.appsearch;
 
+import static android.app.appsearch.AppSearchResult.RESULT_INTERNAL_ERROR;
+
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.app.appsearch.AppSearchEnvironmentFactory;
@@ -32,12 +34,16 @@ import com.android.internal.annotations.GuardedBy;
 import com.android.server.appsearch.external.localstorage.AppSearchImpl;
 import com.android.server.appsearch.external.localstorage.stats.InitializeStats;
 import com.android.server.appsearch.external.localstorage.visibilitystore.VisibilityChecker;
+import com.android.server.appsearch.isolated_storage_service.IsolatedStorageServiceManager;
+
+import com.google.android.icing.IcingSearchEngineInterface;
 
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Manages the lifecycle of AppSearch classes that should only be initialized once per device-user
@@ -55,6 +61,10 @@ public final class AppSearchUserInstanceManager {
 
     @GuardedBy("mStorageInfoLocked")
     private final Map<UserHandle, UserStorageInfo> mStorageInfoLocked = new ArrayMap<>();
+
+    @GuardedBy("mIsolatedStorageServiceManagerLocked")
+    private final AtomicReference<IsolatedStorageServiceManager>
+            mIsolatedStorageServiceManagerLocked = new AtomicReference<>();
 
     private AppSearchUserInstanceManager() {}
 
@@ -223,7 +233,11 @@ public final class AppSearchUserInstanceManager {
                         .getAppSearchDir(userContext, userHandle);
         File icingDir = new File(appSearchDir, "icing");
         if (LogUtil.INFO) {
-            Log.i(TAG, "Creating new AppSearch instance at: " + icingDir);
+            if (IsolatedStorageServiceManager.useIsolatedStorage(userContext)) {
+                Log.i(TAG, "Creating new AppSearch instance in isolated storage.");
+            } else {
+                Log.i(TAG, "Creating new AppSearch instance at: " + icingDir);
+            }
         }
         VisibilityChecker visibilityCheckerImpl =
                 AppSearchComponentFactory.createVisibilityCheckerInstance(userContext);
@@ -239,6 +253,7 @@ public final class AppSearchUserInstanceManager {
                         initStatsBuilder,
                         visibilityCheckerImpl,
                         frameworkRevocableFileDescriptorStore,
+                        maybeGetIsolatedIcingSearchEngine(userContext, userHandle, config),
                         new ServiceOptimizeStrategy(config));
 
         // Update storage info file
@@ -251,5 +266,48 @@ public final class AppSearchUserInstanceManager {
         logger.logStats(initStatsBuilder.build());
 
         return new AppSearchUserInstance(logger, appSearchImpl, visibilityCheckerImpl);
+    }
+
+    /**
+     * Gets the isolated icing engine for the user if isolated storage is enabled.
+     *
+     * @return IcingSearchEngineInterface or null if isolated storage is not enabled.
+     * @throws AppSearchException if isolated storage is enabled, but the isolated storage service
+     *     is unavailable or fails.
+     */
+    @Nullable
+    private IcingSearchEngineInterface maybeGetIsolatedIcingSearchEngine(
+            @NonNull Context userContext,
+            @NonNull UserHandle userHandle,
+            @NonNull ServiceAppSearchConfig config)
+            throws AppSearchException {
+        Objects.requireNonNull(userContext);
+        Objects.requireNonNull(userHandle);
+        Objects.requireNonNull(config);
+
+        if (!IsolatedStorageServiceManager.useIsolatedStorage(userContext)) {
+            Log.i(TAG, "Isolated storage is not enabled.");
+            return null;
+        }
+
+        IcingSearchEngineInterface icingInstance;
+        synchronized (mIsolatedStorageServiceManagerLocked) {
+            if (mIsolatedStorageServiceManagerLocked.get() == null) {
+                mIsolatedStorageServiceManagerLocked.set(
+                        new IsolatedStorageServiceManager(userContext, config));
+                mIsolatedStorageServiceManagerLocked.get().startIsolatedStorageService();
+            }
+            icingInstance =
+                    mIsolatedStorageServiceManagerLocked.get().getIcingInstance(userHandle, config);
+        }
+
+        // Enforce successful isolated storage creation when configured for use
+        if (icingInstance == null) {
+            Log.e(TAG, "Failed to get isolated storage instance!");
+            throw new AppSearchException(
+                    RESULT_INTERNAL_ERROR, "Failed to get isolated storage instance!");
+        }
+
+        return icingInstance;
     }
 }

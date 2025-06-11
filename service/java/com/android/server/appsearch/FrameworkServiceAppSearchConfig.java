@@ -16,7 +16,9 @@
 
 package com.android.server.appsearch;
 
-import android.annotation.NonNull;
+import static com.android.server.appsearch.isolated_storage_service.IsolatedStorageServiceManager.DEFAULT_MAX_PAGE_BYTES_LIMIT_FOR_ISOLATED_STORAGE;
+import static com.android.server.appsearch.isolated_storage_service.IsolatedStorageServiceManager.isolatedStorageFlagsSet;
+
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.DeviceConfig;
@@ -25,6 +27,11 @@ import android.provider.DeviceConfig.OnPropertiesChangedListener;
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.appsearch.external.localstorage.IcingOptionsConfig;
+import com.android.server.appsearch.isolated_storage_service.IsolatedStorageServiceManager;
+
+import com.google.android.icing.proto.PersistType;
+
+import org.jspecify.annotations.NonNull;
 
 import java.util.Objects;
 import java.util.concurrent.Executor;
@@ -66,6 +73,8 @@ public final class FrameworkServiceAppSearchConfig implements ServiceAppSearchCo
             "sampling_interval_for_optimize_stats";
     public static final String KEY_LIMIT_CONFIG_MAX_DOCUMENT_SIZE_BYTES =
             "limit_config_max_document_size_bytes";
+    public static final String KEY_LIMIT_CONFIG_MAX_BYTE_LIMIT_BATCH_PUT =
+            "limit_config_max_byte_limit_batch_put";
     public static final String KEY_LIMIT_CONFIG_PER_PACKAGE_DOCUMENT_COUNT_LIMIT =
             "limit_config_per_package_document_count_limit";
     public static final String KEY_LIMIT_CONFIG_DOCUMENT_COUNT_LIMIT_START_THRESHOLD =
@@ -113,6 +122,8 @@ public final class FrameworkServiceAppSearchConfig implements ServiceAppSearchCo
     public static final String KEY_FULLY_PERSIST_JOB_INTERVAL = "fully_persist_job_interval";
     public static final String KEY_MAX_OPEN_BLOB_COUNT = "max_open_blob_count";
     public static final String KEY_ORPHAN_BLOB_TIME_TO_LIVE_MS = "orphan_blob_time_to_live_ms";
+    public static final String ISOLATED_STORAGE_MEMORY_BYTES = "isolated_storage_memory_bytes";
+    public static final String KEY_LIGHTWEIGHT_PERSIST_TYPE = "lightweight_persist_type";
 
     /**
      * This config does not need to be cached in FrameworkServiceAppSearchConfig as it is only
@@ -162,7 +173,8 @@ public final class FrameworkServiceAppSearchConfig implements ServiceAppSearchCo
         KEY_APP_FUNCTION_CALL_TIMEOUT_MILLIS,
         KEY_FULLY_PERSIST_JOB_INTERVAL,
         KEY_MAX_OPEN_BLOB_COUNT,
-        KEY_ORPHAN_BLOB_TIME_TO_LIVE_MS
+        KEY_ORPHAN_BLOB_TIME_TO_LIVE_MS,
+        KEY_LIGHTWEIGHT_PERSIST_TYPE
     };
 
     // Lock needed for all the operations in this class.
@@ -367,6 +379,16 @@ public final class FrameworkServiceAppSearchConfig implements ServiceAppSearchCo
     }
 
     @Override
+    public int getMaxByteLimitForBatchPut() {
+        synchronized (mLock) {
+            throwIfClosedLocked();
+            return mBundleLocked.getInt(
+                    KEY_LIMIT_CONFIG_MAX_DOCUMENT_SIZE_BYTES,
+                    DEFAULT_LIMIT_CONFIG_MAX_DOCUMENT_SIZE_BYTES);
+        }
+    }
+
+    @Override
     public int getPerPackageDocumentCountLimit() {
         synchronized (mLock) {
             throwIfClosedLocked();
@@ -437,7 +459,7 @@ public final class FrameworkServiceAppSearchConfig implements ServiceAppSearchCo
             throwIfClosedLocked();
             return mBundleLocked.getInt(
                     KEY_MIN_TIME_OPTIMIZE_THRESHOLD_MILLIS,
-                    DEFAULT_MIN_TIME_OPTIMIZE_THRESHOLD_MILLIS);
+                    defaultMinTimeOptimizeThresholdMillis());
         }
     }
 
@@ -546,9 +568,14 @@ public final class FrameworkServiceAppSearchConfig implements ServiceAppSearchCo
     public int getMaxPageBytesLimit() {
         synchronized (mLock) {
             throwIfClosedLocked();
-            return mBundleLocked.getInt(
-                    KEY_ICING_MAX_PAGE_BYTES_LIMIT,
-                    IcingOptionsConfig.DEFAULT_MAX_PAGE_BYTES_LIMIT);
+            // TODO: b/389105038 - remove the temporary workaround for binder transaction
+            //  limit.
+            int defaultMaxPageBytesLimit = IcingOptionsConfig.DEFAULT_MAX_PAGE_BYTES_LIMIT;
+            if (isolatedStorageFlagsSet()) {
+                // It's very likely we are using pVM backed isolated storage now.
+                defaultMaxPageBytesLimit = DEFAULT_MAX_PAGE_BYTES_LIMIT_FOR_ISOLATED_STORAGE;
+            }
+            return mBundleLocked.getInt(KEY_ICING_MAX_PAGE_BYTES_LIMIT, defaultMaxPageBytesLimit);
         }
     }
 
@@ -638,6 +665,23 @@ public final class FrameworkServiceAppSearchConfig implements ServiceAppSearchCo
         }
     }
 
+    // The absolute path for the ICU data file is not available in Framework.
+    // This method is functionally no-op and returns an empty string.
+    @Override
+    public @NonNull String getIcuDataFileAbsolutePath() {
+        return DEFAULT_ICU_DATA_FILE_ABSOLUTE_PATH;
+    }
+
+    @Override
+    public long getIsolatedStorageMemoryBytes() {
+        synchronized (mLock) {
+            throwIfClosedLocked();
+            return mBundleLocked.getLong(
+                    ISOLATED_STORAGE_MEMORY_BYTES,
+                    IsolatedStorageServiceManager.DEFAULT_MEMORY_BYTES);
+        }
+    }
+
     @Override
     public boolean shouldStoreParentInfoAsSyntheticProperty() {
         // This option is always true in Framework.
@@ -653,6 +697,17 @@ public final class FrameworkServiceAppSearchConfig implements ServiceAppSearchCo
         }
     }
 
+    @Override
+    public PersistType.@NonNull Code getLightweightPersistType() {
+        synchronized (mLock) {
+            throwIfClosedLocked();
+            int val =
+                mBundleLocked.getInt(
+                    KEY_LIGHTWEIGHT_PERSIST_TYPE, defaultLightweightPersistType().getNumber());
+            return PersistType.Code.forNumber(val);
+        }
+    }
+
     @GuardedBy("mLock")
     private void throwIfClosedLocked() {
         if (mIsClosedLocked) {
@@ -660,7 +715,7 @@ public final class FrameworkServiceAppSearchConfig implements ServiceAppSearchCo
         }
     }
 
-    private void updateCachedValues(@NonNull DeviceConfig.Properties properties) {
+    private void updateCachedValues(DeviceConfig.@NonNull Properties properties) {
         for (String key : properties.getKeyset()) {
             updateCachedValue(key, properties);
         }
@@ -668,7 +723,7 @@ public final class FrameworkServiceAppSearchConfig implements ServiceAppSearchCo
     }
 
     private void updateCachedValue(
-            @NonNull String key, @NonNull DeviceConfig.Properties properties) {
+            @NonNull String key, DeviceConfig.@NonNull Properties properties) {
         if (properties.getString(key, /* defaultValue= */ null) == null) {
             // Key is missing or value is just null. That is not expected if the key is
             // defined in the configuration.
@@ -702,6 +757,7 @@ public final class FrameworkServiceAppSearchConfig implements ServiceAppSearchCo
                 }
                 break;
             case KEY_LIMIT_CONFIG_MAX_DOCUMENT_SIZE_BYTES:
+            case KEY_LIMIT_CONFIG_MAX_BYTE_LIMIT_BATCH_PUT:
                 synchronized (mLock) {
                     mBundleLocked.putInt(
                             key,
@@ -752,8 +808,7 @@ public final class FrameworkServiceAppSearchConfig implements ServiceAppSearchCo
             case KEY_MIN_TIME_OPTIMIZE_THRESHOLD_MILLIS:
                 synchronized (mLock) {
                     mBundleLocked.putInt(
-                            key,
-                            properties.getInt(key, DEFAULT_MIN_TIME_OPTIMIZE_THRESHOLD_MILLIS));
+                            key, properties.getInt(key, defaultMinTimeOptimizeThresholdMillis()));
                 }
                 break;
             case KEY_API_CALL_STATS_LIMIT:
@@ -932,6 +987,24 @@ public final class FrameworkServiceAppSearchConfig implements ServiceAppSearchCo
             case KEY_MAX_OPEN_BLOB_COUNT:
                 synchronized (mLock) {
                     mBundleLocked.putInt(key, properties.getInt(key, DEFAULT_MAX_OPEN_BLOB_COUNT));
+                }
+                break;
+            case ISOLATED_STORAGE_MEMORY_BYTES:
+                synchronized (mLock) {
+                    mBundleLocked.putLong(
+                            key,
+                            properties.getLong(
+                                    key, IsolatedStorageServiceManager.DEFAULT_MEMORY_BYTES));
+                }
+                break;
+            case KEY_LIGHTWEIGHT_PERSIST_TYPE:
+                synchronized (mLock) {
+                    int val = properties.getInt(key, defaultLightweightPersistType().getNumber());
+                    PersistType.Code code = PersistType.Code.forNumber(val);
+                    // Confirm that the provided value is actually valid. Otherwise, ignore.
+                    if (code != null && code != PersistType.Code.UNKNOWN) {
+                      mBundleLocked.putInt(key, val);
+                    }
                 }
                 break;
             case KEY_BUILD_PROPERTY_EXISTENCE_METADATA_HITS:

@@ -28,6 +28,7 @@ import android.app.appsearch.AppSearchManager;
 import android.app.appsearch.AppSearchResult;
 import android.app.appsearch.AppSearchSchema;
 import android.app.appsearch.GenericDocument;
+import android.app.appsearch.JoinSpec;
 import android.app.appsearch.PackageIdentifier;
 import android.app.appsearch.PutDocumentsRequest;
 import android.app.appsearch.RemoveByDocumentIdRequest;
@@ -42,6 +43,7 @@ import android.util.ArraySet;
 import android.util.Log;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.server.appsearch.appsindexer.appsearchtypes.AppFunctionDocument;
 import com.android.server.appsearch.appsindexer.appsearchtypes.AppFunctionStaticMetadata;
 import com.android.server.appsearch.appsindexer.appsearchtypes.AppOpenEvent;
 import com.android.server.appsearch.appsindexer.appsearchtypes.MobileApplication;
@@ -161,11 +163,185 @@ public class AppSearchHelper implements Closeable {
         Objects.requireNonNull(mobileAppPkgs);
         Objects.requireNonNull(appFunctionPkgs);
 
-        SetSchemaRequest.Builder schemaBuilder =
-                new SetSchemaRequest.Builder()
-                        // If MobileApplication schema later gets changed to a compatible schema, we
-                        // should first try setting the schema with forceOverride = false.
-                        .setForceOverride(true);
+        SetSchemaRequest schemaRequest =
+                buildMobileAppAndPreDefinedAppFuncSchemaRequest(
+                        mobileAppPkgs, appFunctionPkgs, Collections.emptyMap());
+
+        // TODO(b/275592563): Log app removal in metrics
+        mSyncAppSearchAppsDbSession.setSchema(schemaRequest);
+    }
+
+    /**
+     * Sets the AppsIndexer database schema to correspond to the list of passed in {@link
+     * PackageIdentifier}s, representing app schemas, and a list of {@link PackageIdentifier}s,
+     * representing app functions. Note that this means if a schema exists in AppSearch that does
+     * not get passed in to this method, it will be erased. And if a schema does not exist in
+     * AppSearch that is passed in to this method, it will be created.
+     *
+     * <p>Note the following for dynamicAppFunctionSchemasForPackages:
+     *
+     * <ul>
+     *   <li>For packages with no dynamic app function schemas mapping, a predefined schema will be
+     *       created using {@link AppFunctionStaticMetadata#createAppFunctionSchemaForPackage}.
+     *   <li>This method first tries to setSchema for all packages in a single call to {@link
+     *       SyncAppSearchSession#setSchema(SetSchemaRequest)}. If this fails, it iteratively adds
+     *       the dynamic schemas to the request and excludes packages with invalid schemas from
+     *       schema updates.
+     * </ul>
+     *
+     * @param mobileAppPkgs A list of {@link PackageIdentifier}s for which to set {@link
+     *     MobileApplication} schemas for.
+     * @param appFunctionPkgs A list of {@link PackageIdentifier}s for which to set {@link
+     *     AppFunctionStaticMetadata} schemas for. These are packages with an AppFunctionService. It
+     *     is always a subset of `mobileAppPkgs`.
+     * @param dynamicAppFunctionSchemasForPackages A map of package name to a map of schema name to
+     *     {@link AppSearchSchema} for dynamic app functions.
+     */
+    @WorkerThread
+    public void setSchemasForPackages(
+            @NonNull List<PackageIdentifier> mobileAppPkgs,
+            @NonNull List<PackageIdentifier> appFunctionPkgs,
+            @NonNull
+                    Map<String, Map<String, AppSearchSchema>>
+                            dynamicAppFunctionSchemasForPackages) {
+        Objects.requireNonNull(mobileAppPkgs);
+        Objects.requireNonNull(appFunctionPkgs);
+        Objects.requireNonNull(dynamicAppFunctionSchemasForPackages);
+
+        // Build predefined schemas for mobile app packages and app function packages that don't
+        // have dynamic schemas.
+        SetSchemaRequest preDefinedSchemaRequest =
+                buildMobileAppAndPreDefinedAppFuncSchemaRequest(
+                        mobileAppPkgs, appFunctionPkgs, dynamicAppFunctionSchemasForPackages);
+
+        // Build all schemas (predefined + dynamic)
+        SetSchemaRequest.Builder allPackagesRequestBuilder =
+                new SetSchemaRequest.Builder(preDefinedSchemaRequest);
+        addDynamicSchemasToBuilder(
+                allPackagesRequestBuilder, appFunctionPkgs, dynamicAppFunctionSchemasForPackages);
+
+        try {
+            mSyncAppSearchAppsDbSession.setSchema(allPackagesRequestBuilder.build());
+        } catch (AppSearchException e) {
+
+            Log.e(TAG, "Failed to setSchema in batch due to invalid schema.", e);
+            iterativelyAddDynamicSchema(
+                    preDefinedSchemaRequest, appFunctionPkgs, dynamicAppFunctionSchemasForPackages);
+        }
+    }
+
+    /**
+     * Builds a schema request for the specified mobile application and app function packages.
+     *
+     * <p>Only adds pre-defined schemas for app function packages without a dynamic schema mapping.
+     *
+     * @param mobileAppPkgs A list of {@link PackageIdentifier}s for which to set {@link
+     *     MobileApplication} schemas.
+     * @param appFunctionPkgs A list of {@link PackageIdentifier}s for which to set {@link
+     *     AppFunctionStaticMetadata} schemas.
+     * @param dynamicSchemas A map of package names to their dynamic schemas, represented as a map
+     *     of schema names to {@link AppSearchSchema}.
+     * @return A {@link SetSchemaRequest} containing the predefined schemas.
+     */
+    private SetSchemaRequest buildMobileAppAndPreDefinedAppFuncSchemaRequest(
+            @NonNull List<PackageIdentifier> mobileAppPkgs,
+            @NonNull List<PackageIdentifier> appFunctionPkgs,
+            @NonNull Map<String, Map<String, AppSearchSchema>> dynamicSchemas) {
+        SetSchemaRequest.Builder builder = new SetSchemaRequest.Builder().setForceOverride(true);
+
+        populateMobileApplicationSchemas(builder, mobileAppPkgs);
+
+        if (!appFunctionPkgs.isEmpty() && AppFunctionStaticMetadata.shouldSetParentType()) {
+            builder.addSchemas(AppFunctionStaticMetadata.PARENT_TYPE_APPSEARCH_SCHEMA);
+        }
+
+        for (int i = 0; i < appFunctionPkgs.size(); i++) {
+            PackageIdentifier pkg = appFunctionPkgs.get(i);
+            Map<String, AppSearchSchema> packageSchemas =
+                    dynamicSchemas.getOrDefault(pkg.getPackageName(), Collections.emptyMap());
+            if (!packageSchemas.isEmpty()) {
+                // Dynamic schemas are handled separately.
+                continue;
+            }
+            AppSearchSchema schema =
+                    AppFunctionStaticMetadata.createAppFunctionSchemaForPackage(
+                            pkg.getPackageName());
+            builder.addSchemas(schema);
+            builder.setPubliclyVisibleSchema(schema.getSchemaType(), pkg);
+        }
+        return builder.build();
+    }
+
+    /**
+     * Adds dynamic schemas to a schema request builder for the specified app function packages.
+     *
+     * @param builder The {@link SetSchemaRequest.Builder} to which dynamic schemas will be added.
+     * @param appFunctionPkgs A list of {@link PackageIdentifier}s representing app function
+     *     packages.
+     * @param dynamicSchemas A map of package names to their dynamic schemas, represented as a map
+     *     of schema names to {@link AppSearchSchema}.
+     */
+    private void addDynamicSchemasToBuilder(
+            @NonNull SetSchemaRequest.Builder builder,
+            @NonNull List<PackageIdentifier> appFunctionPkgs,
+            @NonNull Map<String, Map<String, AppSearchSchema>> dynamicSchemas) {
+        for (int i = 0; i < appFunctionPkgs.size(); i++) {
+            PackageIdentifier pkg = appFunctionPkgs.get(i);
+            Map<String, AppSearchSchema> packageSchemas =
+                    dynamicSchemas.getOrDefault(pkg.getPackageName(), Collections.emptyMap());
+            for (Map.Entry<String, AppSearchSchema> entry : packageSchemas.entrySet()) {
+                builder.addSchemas(entry.getValue());
+                builder.setPubliclyVisibleSchema(entry.getKey(), pkg);
+            }
+        }
+    }
+
+    /**
+     * Iteratively adds dynamic schemas to the AppsIndexer database to ensure all schemas are
+     * applied successfully, skipping invalid schemas.
+     *
+     * @param preDefinedSchemaRequest The base schema request containing predefined schemas.
+     * @param appFunctionPkgs A list of {@link PackageIdentifier}s representing app function
+     *     packages.
+     * @param dynamicSchemas A map of package names to their dynamic schemas, represented as a map
+     *     of schema names to {@link AppSearchSchema}.
+     */
+    private void iterativelyAddDynamicSchema(
+            @NonNull SetSchemaRequest preDefinedSchemaRequest,
+            @NonNull List<PackageIdentifier> appFunctionPkgs,
+            @NonNull Map<String, Map<String, AppSearchSchema>> dynamicSchemas) {
+        SetSchemaRequest prevSuccessfulRequest = preDefinedSchemaRequest;
+
+        for (int i = 0; i < appFunctionPkgs.size(); i++) {
+            PackageIdentifier pkg = appFunctionPkgs.get(i);
+            Map<String, AppSearchSchema> packageSchemas =
+                    dynamicSchemas.getOrDefault(pkg.getPackageName(), Collections.emptyMap());
+            if (packageSchemas.isEmpty()) {
+                continue;
+            }
+
+            SetSchemaRequest.Builder builder = new SetSchemaRequest.Builder(prevSuccessfulRequest);
+            for (Map.Entry<String, AppSearchSchema> entry : packageSchemas.entrySet()) {
+                builder.addSchemas(entry.getValue());
+                builder.setPubliclyVisibleSchema(entry.getKey(), pkg);
+            }
+
+            try {
+                SetSchemaRequest currentRequest = builder.build();
+                mSyncAppSearchAppsDbSession.setSchema(currentRequest);
+                prevSuccessfulRequest = currentRequest; // Update on success
+            } catch (AppSearchException e) {
+                Log.e(TAG, "Skipping invalid schemas for package: " + pkg.getPackageName(), e);
+            }
+        }
+    }
+
+    /**
+     * Creates and populate the schemas for MobileApplications per package in the SetSchemaRequest.
+     */
+    private static void populateMobileApplicationSchemas(
+            @NonNull SetSchemaRequest.Builder schemaBuilder,
+            @NonNull List<PackageIdentifier> mobileAppPkgs) {
         for (int i = 0; i < mobileAppPkgs.size(); i++) {
             PackageIdentifier pkg = mobileAppPkgs.get(i);
             // As all apps are in the same db, we have to make sure that even if it's getting
@@ -180,22 +356,6 @@ public class AppSearchHelper implements Closeable {
             // PackageIdentifier parameter to setPubliclyVisibleSchema.
             schemaBuilder.setPubliclyVisibleSchema(schemaVariant.getSchemaType(), pkg);
         }
-
-        // Set the base type first for AppFunctions
-        if (!appFunctionPkgs.isEmpty() && AppFunctionStaticMetadata.shouldSetParentType()) {
-            schemaBuilder.addSchemas(AppFunctionStaticMetadata.PARENT_TYPE_APPSEARCH_SCHEMA);
-        }
-        for (int i = 0; i < appFunctionPkgs.size(); i++) {
-            PackageIdentifier pkg = appFunctionPkgs.get(i);
-            String packageName = pkg.getPackageName();
-            AppSearchSchema schemaVariant =
-                    AppFunctionStaticMetadata.createAppFunctionSchemaForPackage(packageName);
-            schemaBuilder.addSchemas(schemaVariant);
-            schemaBuilder.setPubliclyVisibleSchema(schemaVariant.getSchemaType(), pkg);
-        }
-
-        // TODO(b/275592563): Log app removal in metrics
-        mSyncAppSearchAppsDbSession.setSchema(schemaBuilder.build());
     }
 
     /**
@@ -267,7 +427,7 @@ public class AppSearchHelper implements Closeable {
             GenericDocument appFunction = indexedAppFunctions.get(i);
             String id = appFunction.getId();
             String packageName =
-                    appFunction.getPropertyString(AppFunctionStaticMetadata.PROPERTY_PACKAGE_NAME);
+                    appFunction.getPropertyString(AppFunctionDocument.PROPERTY_PACKAGE_NAME);
             if (packagesToReindex.contains(packageName) && !currentAppFunctionIds.contains(id)) {
                 appFunctionIdsToRemove.add(id);
             }
@@ -346,8 +506,8 @@ public class AppSearchHelper implements Closeable {
      * doesn't necessarily have to happen in the current sync.
      *
      * @param apps a list of {@link MobileApplication} documents to be inserted.
-     * @param currentAppFunctions a list of {@link AppFunctionStaticMetadata} documents to be
-     *     AppFunctionStaticMetadata should point to its corresponding MobileApplication.
+     * @param currentAppFunctionDocuments a list of {@link AppFunctionDocument} documents to be
+     *     indexed.
      * @throws AppSearchException if indexing results in a {@link
      *     AppSearchResult#RESULT_OUT_OF_SPACE} result code. It will also throw this if the put call
      *     results in a system error as in {@link BatchResultCallback#onSystemError}. This may
@@ -362,16 +522,16 @@ public class AppSearchHelper implements Closeable {
     @WorkerThread
     public AppSearchBatchResult<String, Void> indexApps(
             @NonNull List<MobileApplication> apps,
-            @NonNull List<AppFunctionStaticMetadata> currentAppFunctions)
+            @NonNull List<AppFunctionDocument> currentAppFunctionDocuments)
             throws AppSearchException {
         Objects.requireNonNull(apps);
-        Objects.requireNonNull(currentAppFunctions);
+        Objects.requireNonNull(currentAppFunctionDocuments);
 
         // Insert all the documents. At this point, the proper schemas should've been set.
         PutDocumentsRequest request =
                 new PutDocumentsRequest.Builder()
                         .addGenericDocuments(apps)
-                        .addGenericDocuments(currentAppFunctions)
+                        .addGenericDocuments(currentAppFunctionDocuments)
                         .build();
 
         AppSearchBatchResult<String, Void> result = mSyncAppSearchAppsDbSession.put(request);
@@ -403,43 +563,53 @@ public class AppSearchHelper implements Closeable {
     }
 
     /**
-     * Returns a mapping of packages to a mapping of function ids to {@link
-     * AppFunctionStaticMetadata} objects. This is useful for determining what has changed during an
-     * update.
+     * Returns a mapping of packages to a mapping of document ids to {@link AppFunctionDocument}
+     * objects in {@link AppFunctionStaticMetadata#APP_FUNCTION_NAMESPACE}. This is useful for
+     * determining what has changed during an update.
      *
      * @param appPackageIds a set of package ids for which to retrieve functions from AppSearch.
      */
     @NonNull
     @WorkerThread
-    public Map<String, Map<String, AppFunctionStaticMetadata>> getAppFunctionsFromAppSearch(
-            List<String> appPackageIds) throws AppSearchException {
-        SearchSpec.Builder allAppFunctionsSpec =
+    public Map<String, Map<String, AppFunctionDocument>> getAppFunctionDocumentsFromAppSearch(
+            Set<String> appPackageIds) throws AppSearchException {
+        SearchSpec allAppFunctionsSpec =
                 new SearchSpec.Builder()
                         .addFilterNamespaces(AppFunctionStaticMetadata.APP_FUNCTION_NAMESPACE)
-                        .setResultCountPerPage(GET_APP_IDS_PAGE_SIZE);
+                        .build();
 
-        for (int i = 0; i < appPackageIds.size(); i++) {
-            String appPackageId = appPackageIds.get(i);
-            allAppFunctionsSpec.addFilterSchemas(
-                    AppFunctionStaticMetadata.getSchemaNameForPackage(
-                        appPackageId, /** schemaType= */ null));
-        }
+        JoinSpec appFunctionJoinSpec =
+                new JoinSpec.Builder(AppFunctionDocument.PROPERTY_MOBILE_APPLICATION_QUALIFIED_ID)
+                        .setNestedSearch("", allAppFunctionsSpec)
+                        .build();
+
+        SearchSpec mobileApplicationSearchSpec =
+                new SearchSpec.Builder()
+                        .addFilterNamespaces(MobileApplication.APPS_NAMESPACE)
+                        .addProjection(
+                                SearchSpec.SCHEMA_TYPE_WILDCARD,
+                                List.of(MobileApplication.APP_PROPERTY_PACKAGE_NAME))
+                        .setJoinSpec(appFunctionJoinSpec)
+                        .build();
 
         SyncSearchResults results =
-                mSyncAppSearchAppsDbSession.search("", allAppFunctionsSpec.build());
+                mSyncAppSearchAppsDbSession.search("", mobileApplicationSearchSpec);
 
-        return collectAppFunctionDocumentsFromAllPages(results);
+        return collectAppFunctionDocumentsFromAllPages(results, new ArraySet<>(appPackageIds));
     }
 
     /**
-     * Iterates through result pages and returns a mapping of package names to a mapping of function
-     * ids to the corresponding app function currently indexed into AppSearch.
+     * Iterates through result pages and returns a mapping of package names to a mapping of document
+     * ids to the corresponding app function documents currently indexed into AppSearch.
+     *
+     * @param results results from a search query to retrieve all the app function documents.
+     * @param appPackageIds a set of package ids for which to retrieve functions from AppSearch.
      */
     @NonNull
     @WorkerThread
-    private Map<String, Map<String, AppFunctionStaticMetadata>>
-            collectAppFunctionDocumentsFromAllPages(@NonNull SyncSearchResults results) {
-        Map<String, Map<String, AppFunctionStaticMetadata>> appFunctionsMap = new ArrayMap<>();
+    private Map<String, Map<String, AppFunctionDocument>> collectAppFunctionDocumentsFromAllPages(
+            @NonNull SyncSearchResults results, Set<String> appPackageIds) {
+        Map<String, Map<String, AppFunctionDocument>> appFunctionDocumentsMap = new ArrayMap<>();
         // TODO(b/357551503): If possible, use pagination instead of building a map containing all
         // function docs.
         try {
@@ -449,25 +619,28 @@ public class AppSearchHelper implements Closeable {
                     GenericDocument genericDocument = resultList.get(i).getGenericDocument();
                     String packageName =
                             genericDocument.getPropertyString(
-                                    AppFunctionStaticMetadata.PROPERTY_PACKAGE_NAME);
-
-                    Map<String, AppFunctionStaticMetadata> functionsForPackage =
-                            appFunctionsMap.get(packageName);
-                    if (functionsForPackage == null) {
-                        functionsForPackage = new ArrayMap<>();
-                        appFunctionsMap.put(packageName, functionsForPackage);
+                                    MobileApplication.APP_PROPERTY_PACKAGE_NAME);
+                    List<SearchResult> joinedResultList = resultList.get(i).getJoinedResults();
+                    if (!appPackageIds.contains(packageName) || joinedResultList.isEmpty()) {
+                        continue;
                     }
-                    functionsForPackage.put(
-                            genericDocument.getPropertyString(
-                                    AppFunctionStaticMetadata.PROPERTY_FUNCTION_ID),
-                            new AppFunctionStaticMetadata(genericDocument));
+
+                    Map<String, AppFunctionDocument> functionDocumentsForPackage =
+                            appFunctionDocumentsMap.computeIfAbsent(
+                                    packageName, k -> new ArrayMap<>());
+                    for (int j = 0; j < joinedResultList.size(); j++) {
+                        AppFunctionDocument functionDocument =
+                                new AppFunctionDocument(
+                                        joinedResultList.get(j).getGenericDocument());
+                        functionDocumentsForPackage.put(functionDocument.getId(), functionDocument);
+                    }
                 }
                 resultList = results.getNextPage();
             }
         } catch (AppSearchException e) {
             Log.e(TAG, "Error while searching for all app documents", e);
         }
-        return appFunctionsMap;
+        return appFunctionDocumentsMap;
     }
 
     /**
@@ -598,7 +771,7 @@ public class AppSearchHelper implements Closeable {
                         .addProjection(
                                 SearchSpec.SCHEMA_TYPE_WILDCARD,
                                 Collections.singletonList(
-                                        AppFunctionStaticMetadata.PROPERTY_PACKAGE_NAME))
+                                        AppFunctionDocument.PROPERTY_PACKAGE_NAME))
                         .addFilterPackageNames(mContext.getPackageName())
                         .setResultCountPerPage(GET_APP_IDS_PAGE_SIZE)
                         .build();
@@ -640,8 +813,7 @@ public class AppSearchHelper implements Closeable {
                     SearchResult result = resultList.get(i);
                     packages.add(
                             result.getGenericDocument()
-                                    .getPropertyString(
-                                            AppFunctionStaticMetadata.PROPERTY_PACKAGE_NAME));
+                                    .getPropertyString(AppFunctionDocument.PROPERTY_PACKAGE_NAME));
                 }
 
                 resultList = results.getNextPage();

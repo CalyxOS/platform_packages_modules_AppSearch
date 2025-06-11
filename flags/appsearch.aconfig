@@ -1,9 +1,10 @@
 package: "com.android.appsearch.flags"
 container: "com.android.appsearch"
 
-#
-# all the flags we are adding in V have to be is_fixed_read_only true.
-#
+# Mainline flags had to be is_fixed_read_only in the past but this is no longer true in Android B+
+# Flags going forward can be created read-write by leaving out is_fixed_read_only.
+# Note, trunk stable does NOT support changing flags from read-only to read-write or vice versa.
+# If you want to change a flag's read type, a new flag must be created.
 
 flag {
     name: "enable_safe_parcelable_2"
@@ -319,4 +320,170 @@ flag {
     bug: "380729091"
     is_fixed_read_only: true
     is_exported: true
+}
+
+flag {
+    name: "enable_check_contacts_indexer_delta_timestamps"
+    namespace: "appsearch"
+    description: "Enables checking Contacts Indexer delta timestamps before delta updates."
+    bug: "329108459"
+    is_exported: true
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
+}
+
+flag {
+    name: "enable_four_hour_min_time_optimize_threshold"
+    namespace: "appsearch"
+    description: "Sets the minimum time interval threshold between successive optimize calls to 4 hours."
+    bug: "385020106"
+    is_exported: true
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
+}
+
+flag {
+    name: "enable_apps_indexer_check_prior_attempt"
+    namespace: "appsearch"
+    description: "Enables a check that prevents apps indexer running too soon after a prior sync."
+    bug: "385197463"
+    is_exported: true
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
+}
+
+flag {
+    name: "enable_check_contacts_indexer_update_job_params"
+    namespace: "appsearch"
+    description: "Enables checking Contacts Indexer update job params on boot and rescheduling if the job params do not match the expected."
+    bug: "384773430"
+    is_exported: true
+}
+
+flag {
+    name: "enable_app_open_events_indexer_check_prior_attempt"
+    namespace: "appsearch"
+    description: "Enables a check that prevents app open events indexer running too soon after a prior sync."
+    bug: "385197463"
+    is_exported: true
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
+}
+
+flag {
+    name: "enable_all_package_indexing_on_indexer_update"
+    namespace: "appsearch"
+    description: "Enables the all package indexing when app indexer is updated."
+    bug: "389034742"
+    is_exported: true
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
+}
+
+flag {
+    name: "enable_isolated_storage"
+    namespace: "appsearch"
+    description: "Uses isolated storage for user data."
+    bug: "384768541"
+    is_exported: true
+}
+
+flag {
+    name: "enable_recovery_proof_persistence"
+    namespace: "appsearch"
+    description: "Whether mutations should call persistToDisk with RECOVERY_PROOF (true) or LITE (false)"
+    bug: "352556856"
+    is_exported: true
+}
+
+flag {
+    name: "enable_schema_description"
+    namespace: "appsearch"
+    description: "Enable getDescription and related builders."
+    bug: "326987971"
+    is_exported: true
+}
+
+flag {
+    name: "enable_app_search_manage_blob_files"
+    namespace: "appsearch"
+    description: "Enable AppSearch to manage blob files."
+    bug: "392140774"
+    is_exported: true
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
+}
+
+flag {
+    name: "enable_calculate_time_since_last_attempted_optimize"
+    namespace: "appsearch"
+    description: "Enable time since last optimize to be calculated by last attempted optimize run time instead of last successful optimize run time."
+    bug: "385189503"
+    is_exported: true
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
+}
+
+flag {
+    name: "enable_qualified_id_join_index_v3"
+    namespace: "appsearch"
+    description: "Enable qualified id join index v3."
+    bug: "376913014"
+    is_exported: true
+}
+
+flag {
+    name: "enable_soft_index_restoration"
+    namespace: "appsearch"
+    description: "Enable soft index restoration."
+    bug: "384947619"
+    is_exported: true
+}
+
+flag {
+    name: "enable_marker_file_for_optimize"
+    namespace: "appsearch"
+    description: "Enable marker file creation for Optimize API."
+    bug: "385021899"
+    is_exported: true
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
+}
+
+flag {
+    name: "enable_release_backup_schema_file_if_overlay_present"
+    namespace: "appsearch"
+    description: "Enable releasing the backup schema file instance in the schema store if the overlay schema instance exists."
+    bug: "396436137"
+    is_exported: true
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
+}
+
+flag {
+    name: "enable_embedding_match_info"
+    namespace: "appsearch"
+    description: "Enables the option to retrieve embedding match info during snippetting."
+    bug: "395128139"
+    is_exported: true
+}
+
+flag {
+    name: "enable_batch_put"
+    namespace: "appsearch"
+    description: "Uses the new batch put API from Icing."
+    bug: "394875109"
+    is_exported: true
+    metadata {
+        purpose: PURPOSE_BUGFIX
+    }
 }

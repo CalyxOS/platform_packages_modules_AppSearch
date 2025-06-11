@@ -20,7 +20,6 @@ import static com.android.server.appsearch.external.localstorage.util.PrefixUtil
 import static com.android.server.appsearch.external.localstorage.util.PrefixUtil.getPackageName;
 import static com.android.server.appsearch.external.localstorage.util.PrefixUtil.removePrefixesFromDocument;
 
-import android.annotation.NonNull;
 import android.app.appsearch.AppSearchResult;
 import android.app.appsearch.GenericDocument;
 import android.app.appsearch.SearchResult;
@@ -34,10 +33,13 @@ import com.android.server.appsearch.external.localstorage.SchemaCache;
 
 import com.google.android.icing.proto.DocumentProto;
 import com.google.android.icing.proto.DocumentProtoOrBuilder;
+import com.google.android.icing.proto.EmbeddingMatchSnippetProto;
 import com.google.android.icing.proto.PropertyProto;
 import com.google.android.icing.proto.SearchResultProto;
 import com.google.android.icing.proto.SnippetMatchProto;
 import com.google.android.icing.proto.SnippetProto;
+
+import org.jspecify.annotations.NonNull;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -58,8 +60,7 @@ public class SearchResultToProtoConverter {
      * @param schemaCache The SchemaCache instance held in AppSearch.
      * @return {@link SearchResultPage} of results.
      */
-    @NonNull
-    public static SearchResultPage toSearchResultPage(
+    public static @NonNull SearchResultPage toSearchResultPage(
             @NonNull SearchResultProto proto,
             @NonNull SchemaCache schemaCache,
             @NonNull AppSearchConfig config)
@@ -81,9 +82,8 @@ public class SearchResultToProtoConverter {
      * @param schemaCache The SchemaCache instance held in AppSearch.
      * @return A {@link SearchResult}.
      */
-    @NonNull
-    private static SearchResult toUnprefixedSearchResult(
-            @NonNull SearchResultProto.ResultProto proto,
+    private static @NonNull SearchResult toUnprefixedSearchResult(
+            SearchResultProto.@NonNull ResultProto proto,
             @NonNull SchemaCache schemaCache,
             @NonNull AppSearchConfig config)
             throws AppSearchException {
@@ -105,8 +105,17 @@ public class SearchResultToProtoConverter {
                 SnippetProto.EntryProto entry = proto.getSnippet().getEntries(i);
                 for (int j = 0; j < entry.getSnippetMatchesCount(); j++) {
                     SearchResult.MatchInfo matchInfo =
-                            toMatchInfo(entry.getSnippetMatches(j), entry.getPropertyName());
+                            toMatchInfoWithTextMatch(
+                                    entry.getSnippetMatches(j), entry.getPropertyName());
                     builder.addMatchInfo(matchInfo);
+                }
+                if (Flags.enableEmbeddingMatchInfo()) {
+                    for (int j = 0; j < entry.getEmbeddingMatchesCount(); j++) {
+                        SearchResult.MatchInfo matchInfo =
+                                toMatchInfoWithEmbeddingMatch(
+                                        entry.getEmbeddingMatches(j), entry.getPropertyName());
+                        builder.addMatchInfo(matchInfo);
+                    }
                 }
             }
         }
@@ -154,7 +163,7 @@ public class SearchResultToProtoConverter {
         }
     }
 
-    private static SearchResult.MatchInfo toMatchInfo(
+    private static SearchResult.MatchInfo toMatchInfoWithTextMatch(
             @NonNull SnippetMatchProto snippetMatchProto, @NonNull String propertyPath) {
         int exactMatchPosition = snippetMatchProto.getExactMatchUtf16Position();
         return new SearchResult.MatchInfo.Builder(propertyPath)
@@ -171,6 +180,22 @@ public class SearchResultToProtoConverter {
                                 snippetMatchProto.getWindowUtf16Position(),
                                 snippetMatchProto.getWindowUtf16Position()
                                         + snippetMatchProto.getWindowUtf16Length()))
+                .build();
+    }
+
+    /**
+     * Returns a MatchInfo for an embedding match. Requires Flags.enableEmbeddingMatchInfo() = true.
+     */
+    private static SearchResult.MatchInfo toMatchInfoWithEmbeddingMatch(
+            @NonNull EmbeddingMatchSnippetProto embeddingMatchSnippetProto,
+            @NonNull String propertyPath) {
+        SearchResult.EmbeddingMatchInfo embeddingMatch =
+                new SearchResult.EmbeddingMatchInfo(
+                        embeddingMatchSnippetProto.getSemanticScore(),
+                        embeddingMatchSnippetProto.getEmbeddingQueryVectorIndex(),
+                        embeddingMatchSnippetProto.getEmbeddingQueryMetricType().getNumber());
+        return new SearchResult.MatchInfo.Builder(propertyPath)
+                .setEmbeddingMatch(embeddingMatch)
                 .build();
     }
 }

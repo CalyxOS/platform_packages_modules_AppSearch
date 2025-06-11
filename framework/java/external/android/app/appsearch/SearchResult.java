@@ -16,6 +16,9 @@
 
 package android.app.appsearch;
 
+import static android.app.appsearch.SearchSpec.EMBEDDING_SEARCH_METRIC_TYPE_COSINE;
+import static android.app.appsearch.SearchSpec.EMBEDDING_SEARCH_METRIC_TYPE_EUCLIDEAN;
+
 import android.annotation.FlaggedApi;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
@@ -56,12 +59,13 @@ import java.util.Set;
  * @see SearchResults
  */
 @SafeParcelable.Class(creator = "SearchResultCreator")
-@SuppressWarnings("HiddenSuperclass")
+// TODO(b/384721898): Switch to JSpecify annotations
+@SuppressWarnings({"HiddenSuperclass", "JSpecifyNullness"})
 public final class SearchResult extends AbstractSafeParcelable {
 
     @FlaggedApi(Flags.FLAG_ENABLE_SAFE_PARCELABLE_2)
-    @NonNull
-    public static final Parcelable.Creator<SearchResult> CREATOR = new SearchResultCreator();
+    public static final @NonNull Parcelable.Creator<SearchResult> CREATOR =
+            new SearchResultCreator();
 
     @Field(id = 1)
     final GenericDocumentParcel mDocument;
@@ -81,9 +85,8 @@ public final class SearchResult extends AbstractSafeParcelable {
     @Field(id = 6, getter = "getJoinedResults")
     private final List<SearchResult> mJoinedResults;
 
-    @NonNull
     @Field(id = 7, getter = "getInformationalRankingSignals")
-    private final List<Double> mInformationalRankingSignals;
+    private final @NonNull List<Double> mInformationalRankingSignals;
 
     /**
      * Holds the map from schema type names to the list of their parent types.
@@ -95,15 +98,14 @@ public final class SearchResult extends AbstractSafeParcelable {
      *
      * <p>All schema names in this map are un-prefixed, for both keys and values.
      */
-    @NonNull
     @Field(id = 8)
-    final Bundle mParentTypeMap;
+    final @NonNull Bundle mParentTypeMap;
 
     /** Cache of the {@link GenericDocument}. Comes from mDocument at first use. */
-    @Nullable private GenericDocument mDocumentCached;
+    private @Nullable GenericDocument mDocumentCached;
 
     /** Cache of the inflated {@link MatchInfo}. Comes from inflating mMatchInfos at first use. */
-    @Nullable private List<MatchInfo> mMatchInfosCached;
+    private @Nullable List<MatchInfo> mMatchInfosCached;
 
     /** @hide */
     @Constructor
@@ -140,8 +142,7 @@ public final class SearchResult extends AbstractSafeParcelable {
      *
      * @return Document object which matched the query.
      */
-    @NonNull
-    public GenericDocument getGenericDocument() {
+    public @NonNull GenericDocument getGenericDocument() {
         if (mDocumentCached == null) {
             mDocumentCached = new GenericDocument(mDocument);
         }
@@ -157,13 +158,18 @@ public final class SearchResult extends AbstractSafeParcelable {
      *     SearchSpec.Builder#setSnippetCountPerProperty}, for all results after that value, this
      *     method returns an empty list.
      */
-    @NonNull
-    public List<MatchInfo> getMatchInfos() {
+    public @NonNull List<MatchInfo> getMatchInfos() {
         if (mMatchInfosCached == null) {
             mMatchInfosCached = new ArrayList<>(mMatchInfos.size());
             for (int i = 0; i < mMatchInfos.size(); i++) {
                 MatchInfo matchInfo = mMatchInfos.get(i);
                 matchInfo.setDocument(getGenericDocument());
+                if (matchInfo.getTextMatch() != null) {
+                    // This is necessary in order to use the TextMatchInfo after IPC, since
+                    // TextMatch.mPropertyPath is private and is not retained by SafeParcelable
+                    // across IPC.
+                    matchInfo.mTextMatch.setPropertyPath(matchInfo.getPropertyPath());
+                }
                 if (mMatchInfosCached != null) {
                     // This additional check is added for NullnessChecker.
                     mMatchInfosCached.add(matchInfo);
@@ -180,8 +186,7 @@ public final class SearchResult extends AbstractSafeParcelable {
      *
      * @return Package name that stored the document
      */
-    @NonNull
-    public String getPackageName() {
+    public @NonNull String getPackageName() {
         return mPackageName;
     }
 
@@ -190,8 +195,7 @@ public final class SearchResult extends AbstractSafeParcelable {
      *
      * @return Name of the database within which the document is stored
      */
-    @NonNull
-    public String getDatabaseName() {
+    public @NonNull String getDatabaseName() {
         return mDatabaseName;
     }
 
@@ -229,9 +233,8 @@ public final class SearchResult extends AbstractSafeParcelable {
      * Returns the informational ranking signals of the {@link GenericDocument}, according to the
      * expressions added in {@link SearchSpec.Builder#addInformationalRankingExpressions}.
      */
-    @NonNull
     @FlaggedApi(Flags.FLAG_ENABLE_INFORMATIONAL_RANKING_EXPRESSIONS)
-    public List<Double> getInformationalRankingSignals() {
+    public @NonNull List<Double> getInformationalRankingSignals() {
         return mInformationalRankingSignals;
     }
 
@@ -246,9 +249,8 @@ public final class SearchResult extends AbstractSafeParcelable {
      * <p>Calling this function repeatedly is inefficient. Prefer to retain the Map returned by this
      * function, rather than calling it multiple times.
      */
-    @NonNull
     @FlaggedApi(Flags.FLAG_ENABLE_SEARCH_RESULT_PARENT_TYPES)
-    public Map<String, List<String>> getParentTypeMap() {
+    public @NonNull Map<String, List<String>> getParentTypeMap() {
         Set<String> schemaTypes = mParentTypeMap.keySet();
         Map<String, List<String>> parentTypeMap = new ArrayMap<>(schemaTypes.size());
         for (String schemaType : schemaTypes) {
@@ -274,8 +276,7 @@ public final class SearchResult extends AbstractSafeParcelable {
      *
      * @return a List of SearchResults containing joined documents.
      */
-    @NonNull
-    public List<SearchResult> getJoinedResults() {
+    public @NonNull List<SearchResult> getJoinedResults() {
         return mJoinedResults;
     }
 
@@ -330,8 +331,7 @@ public final class SearchResult extends AbstractSafeParcelable {
 
         /** Sets the document which matched. */
         @CanIgnoreReturnValue
-        @NonNull
-        public Builder setGenericDocument(@NonNull GenericDocument document) {
+        public @NonNull Builder setGenericDocument(@NonNull GenericDocument document) {
             Objects.requireNonNull(document);
             resetIfBuilt();
             mGenericDocument = document;
@@ -340,8 +340,7 @@ public final class SearchResult extends AbstractSafeParcelable {
 
         /** Adds another match to this SearchResult. */
         @CanIgnoreReturnValue
-        @NonNull
-        public Builder addMatchInfo(@NonNull MatchInfo matchInfo) {
+        public @NonNull Builder addMatchInfo(@NonNull MatchInfo matchInfo) {
             Preconditions.checkState(
                     matchInfo.mDocument == null,
                     "This MatchInfo is already associated with a SearchResult and can't be "
@@ -353,8 +352,7 @@ public final class SearchResult extends AbstractSafeParcelable {
 
         /** Sets the ranking signal of the matched document in this SearchResult. */
         @CanIgnoreReturnValue
-        @NonNull
-        public Builder setRankingSignal(double rankingSignal) {
+        public @NonNull Builder setRankingSignal(double rankingSignal) {
             resetIfBuilt();
             mRankingSignal = rankingSignal;
             return this;
@@ -363,8 +361,7 @@ public final class SearchResult extends AbstractSafeParcelable {
         /** Adds the informational ranking signal of the matched document in this SearchResult. */
         @CanIgnoreReturnValue
         @FlaggedApi(Flags.FLAG_ENABLE_INFORMATIONAL_RANKING_EXPRESSIONS)
-        @NonNull
-        public Builder addInformationalRankingSignal(double rankingSignal) {
+        public @NonNull Builder addInformationalRankingSignal(double rankingSignal) {
             resetIfBuilt();
             mInformationalRankingSignals.add(rankingSignal);
             return this;
@@ -385,8 +382,7 @@ public final class SearchResult extends AbstractSafeParcelable {
          */
         @CanIgnoreReturnValue
         @FlaggedApi(Flags.FLAG_ENABLE_SEARCH_RESULT_PARENT_TYPES)
-        @NonNull
-        public Builder setParentTypeMap(@NonNull Map<String, List<String>> parentTypeMap) {
+        public @NonNull Builder setParentTypeMap(@NonNull Map<String, List<String>> parentTypeMap) {
             Objects.requireNonNull(parentTypeMap);
             resetIfBuilt();
             mParentTypeMap.clear();
@@ -411,10 +407,21 @@ public final class SearchResult extends AbstractSafeParcelable {
          * @param joinedResult The joined SearchResult to add.
          */
         @CanIgnoreReturnValue
-        @NonNull
-        public Builder addJoinedResult(@NonNull SearchResult joinedResult) {
+        public @NonNull Builder addJoinedResult(@NonNull SearchResult joinedResult) {
             resetIfBuilt();
             mJoinedResults.add(joinedResult);
+            return this;
+        }
+
+        /**
+         * Clears the {@link MatchInfo}s.
+         *
+         * @hide
+         */
+        @CanIgnoreReturnValue
+        public @NonNull Builder clearMatchInfos() {
+            resetIfBuilt();
+            mMatchInfos.clear();
             return this;
         }
 
@@ -424,16 +431,14 @@ public final class SearchResult extends AbstractSafeParcelable {
          * @hide
          */
         @CanIgnoreReturnValue
-        @NonNull
-        public Builder clearJoinedResults() {
+        public @NonNull Builder clearJoinedResults() {
             resetIfBuilt();
             mJoinedResults.clear();
             return this;
         }
 
         /** Constructs a new {@link SearchResult}. */
-        @NonNull
-        public SearchResult build() {
+        public @NonNull SearchResult build() {
             mBuilt = true;
             return new SearchResult(
                     mGenericDocument.getDocumentParcel(),
@@ -459,86 +464,17 @@ public final class SearchResult extends AbstractSafeParcelable {
 
     /**
      * This class represents match objects for any snippets that might be present in {@link
-     * SearchResults} from a query. Using this class, you can get:
+     * SearchResults} from a query.
      *
-     * <ul>
-     *   <li>the full text - all of the text in that String property
-     *   <li>the exact term match - the 'term' (full word) that matched the query
-     *   <li>the subterm match - the portion of the matched term that appears in the query
-     *   <li>a suggested text snippet - a portion of the full text surrounding the exact term match,
-     *       set to term boundaries. The size of the snippet is specified in {@link
-     *       SearchSpec.Builder#setMaxSnippetSize}
-     * </ul>
-     *
-     * for each match in the document.
-     *
-     * <p>Class Example 1:
-     *
-     * <p>A document contains the following text in property "subject":
-     *
-     * <p>"A commonly used fake word is foo. Another nonsense word that’s used a lot is bar."
-     *
-     * <p>If the queryExpression is "foo" and {@link SearchSpec#getMaxSnippetSize} is 10,
-     *
-     * <ul>
-     *   <li>{@link MatchInfo#getPropertyPath()} returns "subject"
-     *   <li>{@link MatchInfo#getFullText()} returns "A commonly used fake word is foo. Another
-     *       nonsense word that’s used a lot is bar."
-     *   <li>{@link MatchInfo#getExactMatchRange()} returns [29, 32]
-     *   <li>{@link MatchInfo#getExactMatch()} returns "foo"
-     *   <li>{@link MatchInfo#getSubmatchRange()} returns [29, 32]
-     *   <li>{@link MatchInfo#getSubmatch()} returns "foo"
-     *   <li>{@link MatchInfo#getSnippetRange()} returns [26, 33]
-     *   <li>{@link MatchInfo#getSnippet()} returns "is foo."
-     * </ul>
-     *
-     * <p>
-     *
-     * <p>Class Example 2:
-     *
-     * <p>A document contains one property named "subject" and one property named "sender" which
-     * contains a "name" property.
-     *
-     * <p>In this case, we will have 2 property paths: {@code sender.name} and {@code subject}.
-     *
-     * <p>Let {@code sender.name = "Test Name Jr."} and {@code subject = "Testing 1 2 3"}
-     *
-     * <p>If the queryExpression is "Test" with {@link SearchSpec#TERM_MATCH_PREFIX} and {@link
-     * SearchSpec#getMaxSnippetSize} is 10. We will have 2 matches:
-     *
-     * <p>Match-1
-     *
-     * <ul>
-     *   <li>{@link MatchInfo#getPropertyPath()} returns "sender.name"
-     *   <li>{@link MatchInfo#getFullText()} returns "Test Name Jr."
-     *   <li>{@link MatchInfo#getExactMatchRange()} returns [0, 4]
-     *   <li>{@link MatchInfo#getExactMatch()} returns "Test"
-     *   <li>{@link MatchInfo#getSubmatchRange()} returns [0, 4]
-     *   <li>{@link MatchInfo#getSubmatch()} returns "Test"
-     *   <li>{@link MatchInfo#getSnippetRange()} returns [0, 9]
-     *   <li>{@link MatchInfo#getSnippet()} returns "Test Name"
-     * </ul>
-     *
-     * <p>Match-2
-     *
-     * <ul>
-     *   <li>{@link MatchInfo#getPropertyPath()} returns "subject"
-     *   <li>{@link MatchInfo#getFullText()} returns "Testing 1 2 3"
-     *   <li>{@link MatchInfo#getExactMatchRange()} returns [0, 7]
-     *   <li>{@link MatchInfo#getExactMatch()} returns "Testing"
-     *   <li>{@link MatchInfo#getSubmatchRange()} returns [0, 4]
-     *   <li>{@link MatchInfo#getSubmatch()} returns "Test"
-     *   <li>{@link MatchInfo#getSnippetRange()} returns [0, 9]
-     *   <li>{@link MatchInfo#getSnippet()} returns "Testing 1"
-     * </ul>
+     * <p>A {@link MatchInfo} contains either a {@link TextMatchInfo} representing a text match
+     * snippet, or an {@link EmbeddingMatchInfo} representing an embedding match snippet.
      */
     @SafeParcelable.Class(creator = "MatchInfoCreator")
     @SuppressWarnings("HiddenSuperclass")
     public static final class MatchInfo extends AbstractSafeParcelable {
 
         @FlaggedApi(Flags.FLAG_ENABLE_SAFE_PARCELABLE_2)
-        @NonNull
-        public static final Parcelable.Creator<MatchInfo> CREATOR = new MatchInfoCreator();
+        public static final @NonNull Parcelable.Creator<MatchInfo> CREATOR = new MatchInfoCreator();
 
         /** The path of the matching snippet property. */
         @Field(id = 1, getter = "getPropertyPath")
@@ -562,7 +498,15 @@ public final class SearchResult extends AbstractSafeParcelable {
         @Field(id = 7)
         final int mSnippetRangeEnd;
 
-        @Nullable private PropertyPath mPropertyPathObject = null;
+        /** Represents text-based match information. */
+        @Field(id = 8, getter = "getTextMatch")
+        private @Nullable final TextMatchInfo mTextMatch;
+
+        /** Represents embedding-based match information. */
+        @Field(id = 9, getter = "getEmbeddingMatch")
+        private @Nullable final EmbeddingMatchInfo mEmbeddingMatch;
+
+        private @Nullable PropertyPath mPropertyPathObject = null;
 
         /**
          * Document which the match comes from.
@@ -570,22 +514,7 @@ public final class SearchResult extends AbstractSafeParcelable {
          * <p>If this is {@code null}, methods which require access to the document, like {@link
          * #getExactMatch}, will throw {@link NullPointerException}.
          */
-        @Nullable private GenericDocument mDocument = null;
-
-        /** Full text of the matched property. Populated on first use. */
-        @Nullable private String mFullText;
-
-        /** Range of property that exactly matched the query. Populated on first use. */
-        @Nullable private MatchRange mExactMatchRangeCached;
-
-        /**
-         * Range of property that corresponds to the subsequence of the exact match that directly
-         * matches a query term. Populated on first use.
-         */
-        @Nullable private MatchRange mSubmatchRangeCached;
-
-        /** Range of some reasonable amount of context around the query. Populated on first use. */
-        @Nullable private MatchRange mWindowRangeCached;
+        private @Nullable GenericDocument mDocument = null;
 
         @Constructor
         MatchInfo(
@@ -595,7 +524,9 @@ public final class SearchResult extends AbstractSafeParcelable {
                 @Param(id = 4) int submatchRangeStart,
                 @Param(id = 5) int submatchRangeEnd,
                 @Param(id = 6) int snippetRangeStart,
-                @Param(id = 7) int snippetRangeEnd) {
+                @Param(id = 7) int snippetRangeEnd,
+                @Param(id = 8) @Nullable TextMatchInfo textMatchInfo,
+                @Param(id = 9) @Nullable EmbeddingMatchInfo embeddingMatchInfo) {
             mPropertyPath = Objects.requireNonNull(propertyPath);
             mExactMatchRangeStart = exactMatchRangeStart;
             mExactMatchRangeEnd = exactMatchRangeEnd;
@@ -603,6 +534,18 @@ public final class SearchResult extends AbstractSafeParcelable {
             mSubmatchRangeEnd = submatchRangeEnd;
             mSnippetRangeStart = snippetRangeStart;
             mSnippetRangeEnd = snippetRangeEnd;
+            mEmbeddingMatch = embeddingMatchInfo;
+            TextMatchInfo tempTextMatch = textMatchInfo;
+            if (tempTextMatch == null && mEmbeddingMatch == null) {
+                tempTextMatch =
+                        new TextMatchInfo(
+                                exactMatchRangeStart, exactMatchRangeEnd,
+                                submatchRangeStart, submatchRangeEnd,
+                                snippetRangeStart, snippetRangeEnd);
+                tempTextMatch.setPropertyPath(mPropertyPath);
+            }
+
+            mTextMatch = tempTextMatch;
         }
 
         /**
@@ -614,8 +557,7 @@ public final class SearchResult extends AbstractSafeParcelable {
          * <p>Example properties: 'body', 'sender.name', 'sender.emailaddress', etc. For class
          * example 1 this returns "subject"
          */
-        @NonNull
-        public String getPropertyPath() {
+        public @NonNull String getPropertyPath() {
             return mPropertyPath;
         }
 
@@ -631,12 +573,385 @@ public final class SearchResult extends AbstractSafeParcelable {
          * @see #getPropertyPath
          * @see PropertyPath
          */
-        @NonNull
-        public PropertyPath getPropertyPathObject() {
+        public @NonNull PropertyPath getPropertyPathObject() {
             if (mPropertyPathObject == null) {
                 mPropertyPathObject = new PropertyPath(mPropertyPath);
             }
             return mPropertyPathObject;
+        }
+
+        /**
+         * Retrieves the text-based match information.
+         *
+         * @return A {@link TextMatchInfo} instance, or null if the match is not text-based.
+         */
+        @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+        public @Nullable TextMatchInfo getTextMatch() {
+            return mTextMatch;
+        }
+
+        /**
+         * Retrieves the embedding-based match information. Only populated when {@link
+         * SearchSpec#shouldRetrieveEmbeddingMatchInfos()} is true.
+         *
+         * @return A {@link EmbeddingMatchInfo} instance, or null if the match is not an embedding
+         *     match.
+         */
+        @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+        public @Nullable EmbeddingMatchInfo getEmbeddingMatch() {
+            return mEmbeddingMatch;
+        }
+
+        /**
+         * Gets the full text corresponding to the given entry. Returns an empty string if the match
+         * is not text-based.
+         */
+        public @NonNull String getFullText() {
+            if (mTextMatch == null) {
+                return "";
+            }
+            return mTextMatch.getFullText();
+        }
+
+        /**
+         * Gets the {@link MatchRange} of the exact term of the given entry that matched the query.
+         * Returns [0, 0] if the match is not text-based.
+         */
+        public @NonNull MatchRange getExactMatchRange() {
+            if (mTextMatch == null) {
+                return new MatchRange(0, 0);
+            }
+            return mTextMatch.getExactMatchRange();
+        }
+
+        /**
+         * Gets the exact term of the given entry that matched the query. Returns an empty
+         * CharSequence if the match is not text-based.
+         */
+        public @NonNull CharSequence getExactMatch() {
+            if (mTextMatch == null) {
+                return "";
+            }
+            return mTextMatch.getExactMatch();
+        }
+
+        /**
+         * Gets the {@link MatchRange} of the submatch term subsequence of the given entry that
+         * matched the query. Returns [0, 0] if the match is not text-based.
+         */
+        public @NonNull MatchRange getSubmatchRange() {
+            if (mTextMatch == null) {
+                return new MatchRange(0, 0);
+            }
+            return mTextMatch.getSubmatchRange();
+        }
+
+        /**
+         * Gets the exact term subsequence of the given entry that matched the query. Returns an
+         * empty CharSequence if the match is not text-based.
+         */
+        public @NonNull CharSequence getSubmatch() {
+            if (mTextMatch == null) {
+                return "";
+            }
+            return mTextMatch.getSubmatch();
+        }
+
+        /**
+         * Gets the snippet {@link MatchRange} corresponding to the given entry. Returns [0,0] if
+         * the match is not text-based.
+         *
+         * <p>Only populated when set maxSnippetSize > 0 in {@link
+         * SearchSpec.Builder#setMaxSnippetSize}.
+         */
+        public @NonNull MatchRange getSnippetRange() {
+            if (mTextMatch == null) {
+                return new MatchRange(0, 0);
+            }
+            return mTextMatch.getSnippetRange();
+        }
+
+        /**
+         * Gets the snippet corresponding to the given entry. Returns an empty CharSequence if the
+         * match is not text-based.
+         *
+         * <p>Snippet - Provides a subset of the content to display. Only populated when requested
+         * maxSnippetSize > 0. The size of this content can be changed by {@link
+         * SearchSpec.Builder#setMaxSnippetSize}. Windowing is centered around the middle of the
+         * matched token with content on either side clipped to token boundaries.
+         */
+        public @NonNull CharSequence getSnippet() {
+            if (mTextMatch == null) {
+                return "";
+            }
+            return mTextMatch.getSnippet();
+        }
+
+        /**
+         * Sets the {@link GenericDocument} for {@link MatchInfo}.
+         *
+         * <p>{@link MatchInfo} lacks a constructor that populates {@link MatchInfo#mDocument} This
+         * provides the ability to set {@link MatchInfo#mDocument}
+         */
+        void setDocument(@NonNull GenericDocument document) {
+            mDocument = Objects.requireNonNull(document);
+            if (mTextMatch != null) {
+                mTextMatch.setDocument(document);
+            }
+        }
+
+        @FlaggedApi(Flags.FLAG_ENABLE_SAFE_PARCELABLE_2)
+        @Override
+        public void writeToParcel(@NonNull Parcel dest, int flags) {
+            MatchInfoCreator.writeToParcel(this, dest, flags);
+        }
+
+        /** Builder for {@link MatchInfo} objects. */
+        public static final class Builder {
+            private final String mPropertyPath;
+            private EmbeddingMatchInfo mEmbeddingMatch = null;
+            private MatchRange mExactMatchRange = new MatchRange(0, 0);
+            private MatchRange mSubmatchRange = new MatchRange(-1, -1);
+            private MatchRange mSnippetRange = new MatchRange(0, 0);
+
+            /**
+             * Creates a new {@link MatchInfo.Builder} reporting a match with the given property
+             * path.
+             *
+             * <p>A property path is a dot-delimited sequence of property names indicating which
+             * property in the document these snippets correspond to.
+             *
+             * <p>Example properties: 'body', 'sender.name', 'sender.emailaddress', etc. For class
+             * example 1, this returns "subject".
+             *
+             * @param propertyPath A dot-delimited sequence of property names indicating which
+             *     property in the document these snippets correspond to.
+             */
+            public Builder(@NonNull String propertyPath) {
+                mPropertyPath = Objects.requireNonNull(propertyPath);
+            }
+
+            /** @hide */
+            public Builder(@NonNull MatchInfo matchInfo) {
+                Objects.requireNonNull(matchInfo);
+                mPropertyPath = matchInfo.mPropertyPath;
+                mEmbeddingMatch = matchInfo.getEmbeddingMatch();
+                mExactMatchRange = matchInfo.getExactMatchRange();
+                // Using the fields directly instead of getSubmatchRange() to bypass the
+                // checkSubmatchSupported check.
+                mSubmatchRange =
+                        new MatchRange(matchInfo.mSubmatchRangeStart, matchInfo.mSubmatchRangeEnd);
+                mSnippetRange = matchInfo.getSnippetRange();
+            }
+
+            /** Sets the {@link EmbeddingMatchInfo} corresponding to the given entry. */
+            @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+            @CanIgnoreReturnValue
+            public @NonNull Builder setEmbeddingMatch(@Nullable EmbeddingMatchInfo embeddingMatch) {
+                mEmbeddingMatch = embeddingMatch;
+                return this;
+            }
+
+            /** Sets the exact {@link MatchRange} corresponding to the given entry. */
+            @CanIgnoreReturnValue
+            public @NonNull Builder setExactMatchRange(@NonNull MatchRange matchRange) {
+                mExactMatchRange = Objects.requireNonNull(matchRange);
+                return this;
+            }
+
+            /** Sets the submatch {@link MatchRange} corresponding to the given entry. */
+            @CanIgnoreReturnValue
+            public @NonNull Builder setSubmatchRange(@NonNull MatchRange matchRange) {
+                mSubmatchRange = Objects.requireNonNull(matchRange);
+                return this;
+            }
+
+            /** Sets the snippet {@link MatchRange} corresponding to the given entry. */
+            @CanIgnoreReturnValue
+            public @NonNull Builder setSnippetRange(@NonNull MatchRange matchRange) {
+                mSnippetRange = Objects.requireNonNull(matchRange);
+                return this;
+            }
+
+            /** Constructs a new {@link MatchInfo}. */
+            public @NonNull MatchInfo build() {
+                TextMatchInfo textMatch = null;
+                if (mEmbeddingMatch == null) {
+                    textMatch =
+                            new TextMatchInfo(
+                                    mExactMatchRange.getStart(), mExactMatchRange.getEnd(),
+                                    mSubmatchRange.getStart(), mSubmatchRange.getEnd(),
+                                    mSnippetRange.getStart(), mSnippetRange.getEnd());
+                    textMatch.setPropertyPath(mPropertyPath);
+                }
+                return new MatchInfo(
+                        mPropertyPath,
+                        mExactMatchRange.getStart(),
+                        mExactMatchRange.getEnd(),
+                        mSubmatchRange.getStart(),
+                        mSubmatchRange.getEnd(),
+                        mSnippetRange.getStart(),
+                        mSnippetRange.getEnd(),
+                        textMatch,
+                        mEmbeddingMatch);
+            }
+        }
+    }
+
+    /**
+     * This class represents match objects for any text match snippets that might be present in
+     * {@link SearchResults} from a string query. Using this class, you can get:
+     *
+     * <ul>
+     *   <li>the full text - all of the text in that String property
+     *   <li>the exact term match - the 'term' (full word) that matched the query
+     *   <li>the subterm match - the portion of the matched term that appears in the query
+     *   <li>a suggested text snippet - a portion of the full text surrounding the exact term match,
+     *       set to term boundaries. The size of the snippet is specified in {@link
+     *       SearchSpec.Builder#setMaxSnippetSize}
+     * </ul>
+     *
+     * for each text match in the document.
+     *
+     * <p>Class Example 1:
+     *
+     * <p>A document contains the following text in property "subject":
+     *
+     * <p>"A commonly used fake word is foo. Another nonsense word that’s used a lot is bar."
+     *
+     * <p>If the queryExpression is "foo" and {@link SearchSpec#getMaxSnippetSize} is 10,
+     *
+     * <ul>
+     *   <li>{@link TextMatchInfo#getFullText()} returns "A commonly used fake word is foo. Another
+     *       nonsense word that’s used a lot is bar."
+     *   <li>{@link TextMatchInfo#getExactMatchRange()} returns [29, 32]
+     *   <li>{@link TextMatchInfo#getExactMatch()} returns "foo"
+     *   <li>{@link TextMatchInfo#getSubmatchRange()} returns [29, 32]
+     *   <li>{@link TextMatchInfo#getSubmatch()} returns "foo"
+     *   <li>{@link TextMatchInfo#getSnippetRange()} returns [26, 33]
+     *   <li>{@link TextMatchInfo#getSnippet()} returns "is foo."
+     * </ul>
+     *
+     * <p>
+     *
+     * <p>Class Example 2:
+     *
+     * <p>A document contains one property named "subject" and one property named "sender" which
+     * contains a "name" property.
+     *
+     * <p>In this case, we will have 2 property paths: {@code sender.name} and {@code subject}.
+     *
+     * <p>Let {@code sender.name = "Test Name Jr."} and {@code subject = "Testing 1 2 3"}
+     *
+     * <p>If the queryExpression is "Test" with {@link SearchSpec#TERM_MATCH_PREFIX} and {@link
+     * SearchSpec#getMaxSnippetSize} is 10. We will have 2 matches:
+     *
+     * <p>Match-1
+     *
+     * <ul>
+     *   <li>{@link TextMatchInfo#getFullText()} returns "Test Name Jr."
+     *   <li>{@link TextMatchInfo#getExactMatchRange()} returns [0, 4]
+     *   <li>{@link TextMatchInfo#getExactMatch()} returns "Test"
+     *   <li>{@link TextMatchInfo#getSubmatchRange()} returns [0, 4]
+     *   <li>{@link TextMatchInfo#getSubmatch()} returns "Test"
+     *   <li>{@link TextMatchInfo#getSnippetRange()} returns [0, 9]
+     *   <li>{@link TextMatchInfo#getSnippet()} returns "Test Name"
+     * </ul>
+     *
+     * <p>Match-2
+     *
+     * <ul>
+     *   <li>{@link TextMatchInfo#getFullText()} returns "Testing 1 2 3"
+     *   <li>{@link TextMatchInfo#getExactMatchRange()} returns [0, 7]
+     *   <li>{@link TextMatchInfo#getExactMatch()} returns "Testing"
+     *   <li>{@link TextMatchInfo#getSubmatchRange()} returns [0, 4]
+     *   <li>{@link TextMatchInfo#getSubmatch()} returns "Test"
+     *   <li>{@link TextMatchInfo#getSnippetRange()} returns [0, 9]
+     *   <li>{@link TextMatchInfo#getSnippet()} returns "Testing 1"
+     * </ul>
+     */
+    @SafeParcelable.Class(creator = "TextMatchInfoCreator")
+    @SuppressWarnings("HiddenSuperclass")
+    @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+    public static final class TextMatchInfo extends AbstractSafeParcelable {
+
+        @FlaggedApi(Flags.FLAG_ENABLE_SAFE_PARCELABLE_2)
+        public static final @NonNull Parcelable.Creator<TextMatchInfo> CREATOR =
+                new TextMatchInfoCreator();
+
+        @Field(id = 1)
+        final int mExactMatchRangeStart;
+
+        @Field(id = 2)
+        final int mExactMatchRangeEnd;
+
+        @Field(id = 3)
+        final int mSubmatchRangeStart;
+
+        @Field(id = 4)
+        final int mSubmatchRangeEnd;
+
+        @Field(id = 5)
+        final int mSnippetRangeStart;
+
+        @Field(id = 6)
+        final int mSnippetRangeEnd;
+
+        /**
+         * The path of the matching snippet property.
+         *
+         * <p>If this is {@code null}, methods which require access to the property, like {@link
+         * #getExactMatch}, will throw {@link NullPointerException}.
+         */
+        private @Nullable String mPropertyPath = null;
+
+        /**
+         * Document which the match comes from.
+         *
+         * <p>If this is {@code null}, methods which require access to the document, like {@link
+         * #getExactMatch}, will throw {@link NullPointerException}.
+         */
+        private @Nullable GenericDocument mDocument = null;
+
+        /** Full text of the matched property. Populated on first use. */
+        private @Nullable String mFullText;
+
+        /** Range of property that exactly matched the query. Populated on first use. */
+        private @Nullable MatchRange mExactMatchRangeCached;
+
+        /**
+         * Range of property that corresponds to the subsequence of the exact match that directly
+         * matches a query term. Populated on first use.
+         */
+        private @Nullable MatchRange mSubmatchRangeCached;
+
+        /** Range of some reasonable amount of context around the query. Populated on first use. */
+        private @Nullable MatchRange mWindowRangeCached;
+
+        /**
+         * Creates a new immutable TextMatchInfo.
+         *
+         * @param exactMatchRangeStart the start of the exact {@link MatchRange} for the entry.
+         * @param exactMatchRangeEnd the end of the exact {@link MatchRange} for the entry.
+         * @param submatchRangeStart the start of the sub-match {@link MatchRange} for the entry.
+         * @param submatchRangeEnd the end of the sub-match {@link MatchRange} for the entry.
+         * @param snippetRangeStart the start of the snippet {@link MatchRange} for the entry.
+         * @param snippetRangeEnd the end of the snippet {@link MatchRange} for the entry.
+         */
+        @Constructor
+        public TextMatchInfo(
+                @Param(id = 1) int exactMatchRangeStart,
+                @Param(id = 2) int exactMatchRangeEnd,
+                @Param(id = 3) int submatchRangeStart,
+                @Param(id = 4) int submatchRangeEnd,
+                @Param(id = 5) int snippetRangeStart,
+                @Param(id = 6) int snippetRangeEnd) {
+            mExactMatchRangeStart = exactMatchRangeStart;
+            mExactMatchRangeEnd = exactMatchRangeEnd;
+            mSubmatchRangeStart = submatchRangeStart;
+            mSubmatchRangeEnd = submatchRangeEnd;
+            mSnippetRangeStart = snippetRangeStart;
+            mSnippetRangeEnd = snippetRangeEnd;
         }
 
         /**
@@ -645,15 +960,16 @@ public final class SearchResult extends AbstractSafeParcelable {
          * <p>Class example 1: this returns "A commonly used fake word is foo. Another nonsense word
          * that's used a lot is bar."
          *
-         * <p>Class example 2: for the first {@link MatchInfo}, this returns "Test Name Jr." and,
-         * for the second {@link MatchInfo}, this returns "Testing 1 2 3".
+         * <p>Class example 2: for the first {@link TextMatchInfo}, this returns "Test Name Jr."
+         * and, for the second {@link TextMatchInfo}, this returns "Testing 1 2 3".
          */
-        @NonNull
-        public String getFullText() {
+        @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+        public @NonNull String getFullText() {
             if (mFullText == null) {
-                if (mDocument == null) {
+                if (mDocument == null || mPropertyPath == null) {
                     throw new IllegalStateException(
-                            "Document has not been populated; this MatchInfo cannot be used yet");
+                            "Document or property path has not been populated; this TextMatchInfo"
+                                    + " cannot be used yet");
                 }
                 mFullText = getPropertyValues(mDocument, mPropertyPath);
             }
@@ -665,11 +981,11 @@ public final class SearchResult extends AbstractSafeParcelable {
          *
          * <p>Class example 1: this returns [29, 32].
          *
-         * <p>Class example 2: for the first {@link MatchInfo}, this returns [0, 4] and, for the
-         * second {@link MatchInfo}, this returns [0, 7].
+         * <p>Class example 2: for the first {@link TextMatchInfo}, this returns [0, 4] and, for the
+         * second {@link TextMatchInfo}, this returns [0, 7].
          */
-        @NonNull
-        public MatchRange getExactMatchRange() {
+        @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+        public @NonNull MatchRange getExactMatchRange() {
             if (mExactMatchRangeCached == null) {
                 mExactMatchRangeCached = new MatchRange(mExactMatchRangeStart, mExactMatchRangeEnd);
             }
@@ -681,11 +997,11 @@ public final class SearchResult extends AbstractSafeParcelable {
          *
          * <p>Class example 1: this returns "foo".
          *
-         * <p>Class example 2: for the first {@link MatchInfo}, this returns "Test" and, for the
-         * second {@link MatchInfo}, this returns "Testing".
+         * <p>Class example 2: for the first {@link TextMatchInfo}, this returns "Test" and, for the
+         * second {@link TextMatchInfo}, this returns "Testing".
          */
-        @NonNull
-        public CharSequence getExactMatch() {
+        @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+        public @NonNull CharSequence getExactMatch() {
             return getSubstring(getExactMatchRange());
         }
 
@@ -695,11 +1011,11 @@ public final class SearchResult extends AbstractSafeParcelable {
          *
          * <p>Class example 1: this returns [29, 32].
          *
-         * <p>Class example 2: for the first {@link MatchInfo}, this returns [0, 4] and, for the
-         * second {@link MatchInfo}, this returns [0, 4].
+         * <p>Class example 2: for the first {@link TextMatchInfo}, this returns [0, 4] and, for the
+         * second {@link TextMatchInfo}, this returns [0, 4].
          */
-        @NonNull
-        public MatchRange getSubmatchRange() {
+        @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+        public @NonNull MatchRange getSubmatchRange() {
             checkSubmatchSupported();
             if (mSubmatchRangeCached == null) {
                 mSubmatchRangeCached = new MatchRange(mSubmatchRangeStart, mSubmatchRangeEnd);
@@ -712,28 +1028,28 @@ public final class SearchResult extends AbstractSafeParcelable {
          *
          * <p>Class example 1: this returns "foo".
          *
-         * <p>Class example 2: for the first {@link MatchInfo}, this returns "Test" and, for the
-         * second {@link MatchInfo}, this returns "Test".
+         * <p>Class example 2: for the first {@link TextMatchInfo}, this returns "Test" and, for the
+         * second {@link TextMatchInfo}, this returns "Test".
          */
-        @NonNull
-        public CharSequence getSubmatch() {
+        @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+        public @NonNull CharSequence getSubmatch() {
             checkSubmatchSupported();
             return getSubstring(getSubmatchRange());
         }
 
         /**
-         * Gets the snippet {@link MatchRange} corresponding to the given entry.
+         * Gets the snippet {@link TextMatchInfo} corresponding to the given entry.
          *
          * <p>Only populated when set maxSnippetSize > 0 in {@link
          * SearchSpec.Builder#setMaxSnippetSize}.
          *
          * <p>Class example 1: this returns [29, 41].
          *
-         * <p>Class example 2: for the first {@link MatchInfo}, this returns [0, 9] and, for the
-         * second {@link MatchInfo}, this returns [0, 13].
+         * <p>Class example 2: for the first {@link TextMatchInfo}, this returns [0, 9] and, for the
+         * second {@link TextMatchInfo}, this returns [0, 13].
          */
-        @NonNull
-        public MatchRange getSnippetRange() {
+        @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+        public @NonNull MatchRange getSnippetRange() {
             if (mWindowRangeCached == null) {
                 mWindowRangeCached = new MatchRange(mSnippetRangeStart, mSnippetRangeEnd);
             }
@@ -750,11 +1066,11 @@ public final class SearchResult extends AbstractSafeParcelable {
          *
          * <p>Class example 1: this returns "foo. Another".
          *
-         * <p>Class example 2: for the first {@link MatchInfo}, this returns "Test Name" and, for
-         * the second {@link MatchInfo}, this returns "Testing 1 2 3".
+         * <p>Class example 2: for the first {@link TextMatchInfo}, this returns "Test Name" and,
+         * for the second {@link TextMatchInfo}, this returns "Testing 1 2 3".
          */
-        @NonNull
-        public CharSequence getSnippet() {
+        @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+        public @NonNull CharSequence getSnippet() {
             return getSubstring(getSnippetRange());
         }
 
@@ -781,101 +1097,120 @@ public final class SearchResult extends AbstractSafeParcelable {
         }
 
         /**
-         * Sets the {@link GenericDocument} for {@link MatchInfo}.
+         * Sets the {@link GenericDocument} for this {@link TextMatchInfo}.
          *
-         * <p>{@link MatchInfo} lacks a constructor that populates {@link MatchInfo#mDocument} This
-         * provides the ability to set {@link MatchInfo#mDocument}
+         * <p>{@link TextMatchInfo} lacks a constructor that populates {@link
+         * TextMatchInfo#mDocument} This provides the ability to set {@link TextMatchInfo#mDocument}
          */
         void setDocument(@NonNull GenericDocument document) {
-            mDocument = document;
+            mDocument = Objects.requireNonNull(document);
+        }
+
+        /**
+         * Sets the property path for this {@link TextMatchInfo}.
+         *
+         * <p>{@link TextMatchInfo} lacks a constructor that populates {@link
+         * TextMatchInfo#mPropertyPath} This provides the ability to set it.
+         */
+        void setPropertyPath(@NonNull String propertyPath) {
+            mPropertyPath = Objects.requireNonNull(propertyPath);
         }
 
         @FlaggedApi(Flags.FLAG_ENABLE_SAFE_PARCELABLE_2)
         @Override
         public void writeToParcel(@NonNull Parcel dest, int flags) {
-            MatchInfoCreator.writeToParcel(this, dest, flags);
-        }
-
-        /** Builder for {@link MatchInfo} objects. */
-        public static final class Builder {
-            private final String mPropertyPath;
-            private MatchRange mExactMatchRange = new MatchRange(0, 0);
-            int mSubmatchRangeStart = -1;
-            int mSubmatchRangeEnd = -1;
-            private MatchRange mSnippetRange = new MatchRange(0, 0);
-
-            /**
-             * Creates a new {@link MatchInfo.Builder} reporting a match with the given property
-             * path.
-             *
-             * <p>A property path is a dot-delimited sequence of property names indicating which
-             * property in the document these snippets correspond to.
-             *
-             * <p>Example properties: 'body', 'sender.name', 'sender.emailaddress', etc. For class
-             * example 1, this returns "subject".
-             *
-             * @param propertyPath A dot-delimited sequence of property names indicating which
-             *     property in the document these snippets correspond to.
-             */
-            public Builder(@NonNull String propertyPath) {
-                mPropertyPath = Objects.requireNonNull(propertyPath);
-            }
-
-            /** @hide */
-            public Builder(@NonNull MatchInfo matchInfo) {
-                Objects.requireNonNull(matchInfo);
-                mPropertyPath = matchInfo.mPropertyPath;
-                mExactMatchRange = matchInfo.getExactMatchRange();
-                mSubmatchRangeStart = matchInfo.mSubmatchRangeStart;
-                mSubmatchRangeEnd = matchInfo.mSubmatchRangeEnd;
-                mSnippetRange = matchInfo.getSnippetRange();
-            }
-
-            /** Sets the exact {@link MatchRange} corresponding to the given entry. */
-            @CanIgnoreReturnValue
-            @NonNull
-            public Builder setExactMatchRange(@NonNull MatchRange matchRange) {
-                mExactMatchRange = Objects.requireNonNull(matchRange);
-                return this;
-            }
-
-            /**
-             * Sets the start and end of a submatch {@link MatchRange} corresponding to the given
-             * entry.
-             */
-            @CanIgnoreReturnValue
-            @NonNull
-            public Builder setSubmatchRange(@NonNull MatchRange matchRange) {
-                mSubmatchRangeStart = matchRange.getStart();
-                mSubmatchRangeEnd = matchRange.getEnd();
-                return this;
-            }
-
-            /** Sets the snippet {@link MatchRange} corresponding to the given entry. */
-            @CanIgnoreReturnValue
-            @NonNull
-            public Builder setSnippetRange(@NonNull MatchRange matchRange) {
-                mSnippetRange = Objects.requireNonNull(matchRange);
-                return this;
-            }
-
-            /** Constructs a new {@link MatchInfo}. */
-            @NonNull
-            public MatchInfo build() {
-                return new MatchInfo(
-                        mPropertyPath,
-                        mExactMatchRange.getStart(),
-                        mExactMatchRange.getEnd(),
-                        mSubmatchRangeStart,
-                        mSubmatchRangeEnd,
-                        mSnippetRange.getStart(),
-                        mSnippetRange.getEnd());
-            }
+            TextMatchInfoCreator.writeToParcel(this, dest, flags);
         }
     }
 
     /**
-     * Class providing the position range of matching information.
+     * This class represents match objects for any snippets that might be present in {@link
+     * SearchResults} from an embedding query. Using this class, you can get:
+     *
+     * <ul>
+     *   <li>the semantic score of the matching vector with the embedding query
+     *   <li>the query embedding vector index - the index of the query {@link EmbeddingVector} in
+     *       the list returned by {@link SearchSpec#getEmbeddingParameters()}
+     *   <li>the embedding search metric type for the corresponding query
+     * </ul>
+     *
+     * for each vector match in the document.
+     */
+    @SafeParcelable.Class(creator = "EmbeddingMatchInfoCreator")
+    @SuppressWarnings("HiddenSuperclass")
+    @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+    public static final class EmbeddingMatchInfo extends AbstractSafeParcelable {
+
+        @FlaggedApi(Flags.FLAG_ENABLE_SAFE_PARCELABLE_2)
+        public static final @NonNull Parcelable.Creator<EmbeddingMatchInfo> CREATOR =
+                new EmbeddingMatchInfoCreator();
+
+        @Field(id = 1, getter = "getSemanticScore")
+        private final double mSemanticScore;
+
+        @Field(id = 2, getter = "getQueryEmbeddingVectorIndex")
+        private final int mQueryEmbeddingVectorIndex;
+
+        @Field(id = 3, getter = "getEmbeddingSearchMetricType")
+        private final int mEmbeddingSearchMetricType;
+
+        /**
+         * Creates a new immutable EmbeddingMatchInfo.
+         *
+         * @param semanticScore the semantic score of the embedding match against the query vector.
+         * @param queryEmbeddingVectorIndex the index of the matched query embedding vector in
+         *     {@link SearchSpec#getEmbeddingParameters()}
+         * @param embeddingSearchMetricType the search metric type used to calculate the score for
+         *     the match and the query vector
+         */
+        @Constructor
+        public EmbeddingMatchInfo(
+                @Param(id = 1) double semanticScore,
+                @Param(id = 2) int queryEmbeddingVectorIndex,
+                @Param(id = 3) @SearchSpec.EmbeddingSearchMetricType
+                        int embeddingSearchMetricType) {
+            Preconditions.checkArgumentInRange(
+                    embeddingSearchMetricType,
+                    EMBEDDING_SEARCH_METRIC_TYPE_COSINE,
+                    EMBEDDING_SEARCH_METRIC_TYPE_EUCLIDEAN,
+                    "Embedding search metric type");
+            mSemanticScore = semanticScore;
+            mQueryEmbeddingVectorIndex = queryEmbeddingVectorIndex;
+            mEmbeddingSearchMetricType = embeddingSearchMetricType;
+        }
+
+        /** Gets the semantic score corresponding to the embedding match. */
+        @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+        public double getSemanticScore() {
+            return mSemanticScore;
+        }
+
+        /**
+         * Gets the index of the query vector that this embedding match corresponds to. This is the
+         * index of the query {@link EmbeddingVector} in the list returned by {@link
+         * SearchSpec#getEmbeddingParameters()}
+         */
+        @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+        public int getQueryEmbeddingVectorIndex() {
+            return mQueryEmbeddingVectorIndex;
+        }
+
+        /** Gets the embedding search metric type that this embedding match corresponds to. */
+        @FlaggedApi(Flags.FLAG_ENABLE_EMBEDDING_MATCH_INFO)
+        @SearchSpec.EmbeddingSearchMetricType
+        public int getEmbeddingSearchMetricType() {
+            return mEmbeddingSearchMetricType;
+        }
+
+        @FlaggedApi(Flags.FLAG_ENABLE_SAFE_PARCELABLE_2)
+        @Override
+        public void writeToParcel(@NonNull Parcel dest, int flags) {
+            EmbeddingMatchInfoCreator.writeToParcel(this, dest, flags);
+        }
+    }
+
+    /**
+     * Class providing the position range of a text match information.
      *
      * <p>All ranges are finite, and the left side of the range is always {@code <=} the right side
      * of the range.
@@ -928,8 +1263,7 @@ public final class SearchResult extends AbstractSafeParcelable {
         }
 
         @Override
-        @NonNull
-        public String toString() {
+        public @NonNull String toString() {
             return "MatchRange { start: " + mStart + " , end: " + mEnd + "}";
         }
 

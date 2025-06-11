@@ -16,8 +16,6 @@
 
 package com.android.server.appsearch.contactsindexer;
 
-import static com.android.server.appsearch.indexer.IndexerMaintenanceConfig.CONTACTS_INDEXER;
-
 import static com.google.common.truth.Truth.assertThat;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -25,7 +23,7 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyZeroInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 import android.annotation.NonNull;
 import android.app.appsearch.AppSearchManager;
@@ -38,6 +36,7 @@ import android.app.appsearch.observer.ObserverCallback;
 import android.app.appsearch.observer.ObserverSpec;
 import android.app.appsearch.observer.SchemaChangeInfo;
 import android.app.appsearch.testutil.AppSearchSessionShimImpl;
+import android.app.appsearch.testutil.AppSearchTestUtils;
 import android.app.appsearch.testutil.GlobalSearchSessionShimImpl;
 import android.app.appsearch.testutil.TestContactsIndexerConfig;
 import android.app.job.JobInfo;
@@ -47,10 +46,14 @@ import android.content.ContentUris;
 import android.content.ContentValues;
 import android.os.CancellationSignal;
 import android.os.PersistableBundle;
+import android.platform.test.annotations.RequiresFlagsDisabled;
+import android.platform.test.annotations.RequiresFlagsEnabled;
 import android.provider.ContactsContract;
 
+import androidx.test.core.app.ApplicationProvider;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 
+import com.android.appsearch.flags.Flags;
 import com.android.dx.mockito.inline.extended.ExtendedMockito;
 import com.android.dx.mockito.inline.extended.StaticMockitoSessionBuilder;
 import com.android.modules.utils.testing.ExtendedMockitoRule;
@@ -63,6 +66,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.RuleChain;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
@@ -83,6 +87,19 @@ import java.util.concurrent.atomic.AtomicReference;
 
 @RunWith(AndroidJUnit4.class)
 public class ContactsIndexerUserInstanceTest extends FakeContactsProviderTestBase {
+    private static final JobInfo PERIODIC_JOB_INFO = IndexerMaintenanceService.createJobInfo(
+            ApplicationProvider.getApplicationContext(),
+            ApplicationProvider.getApplicationContext().getUser(),
+            ContactsIndexerMaintenanceConfig.CONTACTS_INDEXER, /* periodic= */
+            true, /* intervalMillis= */
+            ContactsIndexerConfig.DEFAULT_CONTACTS_FULL_UPDATE_INTERVAL_MILLIS);
+
+    private static final JobInfo IMMEDIATE_JOB_INFO = IndexerMaintenanceService.createJobInfo(
+            ApplicationProvider.getApplicationContext(),
+            ApplicationProvider.getApplicationContext().getUser(),
+            ContactsIndexerMaintenanceConfig.CONTACTS_INDEXER, /* periodic= */
+            false, /* intervalMillis= */ -1);
+
     @Rule
     public TemporaryFolder mTemporaryFolder = new TemporaryFolder();
 
@@ -90,6 +107,9 @@ public class ContactsIndexerUserInstanceTest extends FakeContactsProviderTestBas
     public ExtendedMockitoRule mExtendedMockitoRule = new ExtendedMockitoRule.Builder()
             .addStaticMockFixtures(TestMockFixture::new)
             .build();
+
+    @Rule
+    public final RuleChain mRuleChain = AppSearchTestUtils.createCommonTestRules();
 
     private final ExecutorService mSingleThreadedExecutor = Executors.newSingleThreadExecutor();
     private File mContactsDir;
@@ -237,13 +257,7 @@ public class ContactsIndexerUserInstanceTest extends FakeContactsProviderTestBas
     }
 
     @Test
-    public void testStart_initialRun_schedulesFullUpdateJob() throws Exception {
-        JobScheduler mockJobScheduler = mock(JobScheduler.class);
-        mContext.setJobScheduler(mockJobScheduler);
-        ContactsIndexerUserInstance instance = ContactsIndexerUserInstance.createInstance(
-                mContext,
-                mContactsDir, mConfigForTest, mSingleThreadedExecutor);
-
+    public void testStartAsync_initialRun_schedulesFullUpdateJob() throws Exception {
         int docCount = 100;
         CountDownLatch latch = new CountDownLatch(docCount);
         GlobalSearchSessionShim shim =
@@ -265,33 +279,34 @@ public class ContactsIndexerUserInstanceTest extends FakeContactsProviderTestBas
                 new ObserverSpec.Builder().addFilterSchemas("builtin:Person").build(),
                 mSingleThreadedExecutor,
                 callback);
-        // Insert contacts to trigger delta update.
+        // Insert contacts for delta update
         ContentResolver resolver = mContext.getContentResolver();
         ContentValues dummyValues = new ContentValues();
         for (int i = 0; i < docCount; i++) {
             resolver.insert(ContactsContract.Contacts.CONTENT_URI, dummyValues);
         }
 
-        try {
-            instance.startAsync();
+        JobScheduler mockJobScheduler = mock(JobScheduler.class);
+        mContext.setJobScheduler(mockJobScheduler);
 
-            // Wait for all async tasks to complete
+        try {
+            mInstance.startAsync();
+
+            // Wait for initial delta update to index contacts
             latch.await(30L, TimeUnit.SECONDS);
 
             ArgumentCaptor<JobInfo> jobInfoArgumentCaptor = ArgumentCaptor.forClass(JobInfo.class);
             verify(mockJobScheduler).schedule(jobInfoArgumentCaptor.capture());
             JobInfo fullUpdateJob = jobInfoArgumentCaptor.getValue();
-            assertThat(fullUpdateJob.isRequireBatteryNotLow()).isTrue();
-            assertThat(fullUpdateJob.isRequireDeviceIdle()).isTrue();
-            assertThat(fullUpdateJob.isPersisted()).isTrue();
-            assertThat(fullUpdateJob.isPeriodic()).isFalse();
+            assertThat(fullUpdateJob).isEqualTo(IMMEDIATE_JOB_INFO);
         } finally {
-            instance.shutdown();
+            // unregisters observers registered by startAsync()
+            mInstance.shutdown();
         }
     }
 
     @Test
-    public void testStart_subsequentRunWithNoScheduledJob_schedulesFullUpdateJob()
+    public void testCp2SyncFirstRun_subsequentRunWithNoScheduledJob_schedulesFullUpdateJob()
             throws Exception {
         // Trigger an initial full update.
         executeAndWaitForCompletion(
@@ -303,57 +318,18 @@ public class ContactsIndexerUserInstanceTest extends FakeContactsProviderTestBas
         // due to some reason.
         JobScheduler mockJobScheduler = mock(JobScheduler.class);
         mContext.setJobScheduler(mockJobScheduler);
-        ContactsIndexerUserInstance instance = ContactsIndexerUserInstance.createInstance(
-                mContext, mContactsDir, mConfigForTest, mSingleThreadedExecutor);
 
-        int docCount = 100;
-        CountDownLatch latch = new CountDownLatch(docCount);
-        GlobalSearchSessionShim shim =
-                GlobalSearchSessionShimImpl.createGlobalSearchSessionAsync(mContext).get();
-        ObserverCallback callback = new ObserverCallback() {
-            @Override
-            public void onSchemaChanged(SchemaChangeInfo changeInfo) {
-                // Do nothing
-            }
+        mInstance.doCp2SyncFirstRun();
 
-            @Override
-            public void onDocumentChanged(DocumentChangeInfo changeInfo) {
-                for (int i = 0; i < changeInfo.getChangedDocumentIds().size(); i++) {
-                    latch.countDown();
-                }
-            }
-        };
-        shim.registerObserverCallback(mContext.getPackageName(),
-                new ObserverSpec.Builder().addFilterSchemas("builtin:Person").build(),
-                mSingleThreadedExecutor,
-                callback);
-        // Insert contacts to trigger delta update.
-        ContentResolver resolver = mContext.getContentResolver();
-        ContentValues dummyValues = new ContentValues();
-        for (int i = 0; i < docCount; i++) {
-            resolver.insert(ContactsContract.Contacts.CONTENT_URI, dummyValues);
-        }
-
-        try {
-            instance.startAsync();
-
-            // Wait for all async tasks to complete
-            latch.await(30L, TimeUnit.SECONDS);
-
-            ArgumentCaptor<JobInfo> jobInfoArgumentCaptor = ArgumentCaptor.forClass(JobInfo.class);
-            verify(mockJobScheduler).schedule(jobInfoArgumentCaptor.capture());
-            JobInfo fullUpdateJob = jobInfoArgumentCaptor.getValue();
-            assertThat(fullUpdateJob.isRequireBatteryNotLow()).isTrue();
-            assertThat(fullUpdateJob.isRequireDeviceIdle()).isTrue();
-            assertThat(fullUpdateJob.isPersisted()).isTrue();
-            assertThat(fullUpdateJob.isPeriodic()).isFalse();
-        } finally {
-            instance.shutdown();
-        }
+        ArgumentCaptor<JobInfo> jobInfoArgumentCaptor = ArgumentCaptor.forClass(JobInfo.class);
+        verify(mockJobScheduler).schedule(jobInfoArgumentCaptor.capture());
+        JobInfo fullUpdateJob = jobInfoArgumentCaptor.getValue();
+        assertThat(fullUpdateJob).isEqualTo(IMMEDIATE_JOB_INFO);
     }
 
     @Test
-    public void testStart_subsequentRunWithScheduledJob_doesNotScheduleFullUpdateJob()
+    public void
+    testCp2SyncFirstRun_subsequentRunWithMatchingPeriodicJob_doesNotScheduleFullUpdateJob()
             throws Exception {
         // Trigger an initial full update.
         executeAndWaitForCompletion(
@@ -361,56 +337,97 @@ public class ContactsIndexerUserInstanceTest extends FakeContactsProviderTestBas
                 mSingleThreadedExecutor);
 
         JobScheduler mockJobScheduler = mock(JobScheduler.class);
-        JobInfo mockJobInfo = mock(JobInfo.class);
-        // getPendingJob() should return a non-null value to simulate the scenario where a
-        // background job is already scheduled.
-        doReturn(mockJobInfo)
+        mContext.setJobScheduler(mockJobScheduler);
+        // Simulate getPendingJob() returning a periodic job with expected parameters
+        doReturn(PERIODIC_JOB_INFO)
                 .when(mockJobScheduler)
                 .getPendingJob(
                         ContactsIndexerMaintenanceConfig.MIN_CONTACTS_INDEXER_JOB_ID
                                 + mContext.getUser().getIdentifier());
+
+        mInstance.doCp2SyncFirstRun();
+
+        verify(mockJobScheduler, never()).schedule(any());
+    }
+
+    @Test
+    public void
+    testCp2SyncFirstRun_subsequentRunWithMatchingImmediateJob_doesNotScheduleFullUpdateJob()
+            throws Exception {
+        // Trigger an initial full update.
+        executeAndWaitForCompletion(
+                mInstance.doFullUpdateInternalAsync(new CancellationSignal(), mUpdateStats),
+                mSingleThreadedExecutor);
+
+        JobScheduler mockJobScheduler = mock(JobScheduler.class);
         mContext.setJobScheduler(mockJobScheduler);
-        ContactsIndexerUserInstance instance = ContactsIndexerUserInstance.createInstance(
-                mContext, mContactsDir, mConfigForTest, mSingleThreadedExecutor);
+        // Simulate getPendingJob() returning an immediate job with expected parameters
+        doReturn(IMMEDIATE_JOB_INFO)
+                .when(mockJobScheduler)
+                .getPendingJob(
+                        ContactsIndexerMaintenanceConfig.MIN_CONTACTS_INDEXER_JOB_ID
+                                + mContext.getUser().getIdentifier());
 
-        int docCount = 100;
-        CountDownLatch latch = new CountDownLatch(docCount);
-        GlobalSearchSessionShim shim =
-                GlobalSearchSessionShimImpl.createGlobalSearchSessionAsync(mContext).get();
-        ObserverCallback callback = new ObserverCallback() {
-            @Override
-            public void onSchemaChanged(SchemaChangeInfo changeInfo) {
-                // Do nothing
-            }
+        mInstance.doCp2SyncFirstRun();
 
-            @Override
-            public void onDocumentChanged(DocumentChangeInfo changeInfo) {
-                for (int i = 0; i < changeInfo.getChangedDocumentIds().size(); i++) {
-                    latch.countDown();
-                }
-            }
-        };
-        shim.registerObserverCallback(mContext.getPackageName(),
-                new ObserverSpec.Builder().addFilterSchemas("builtin:Person").build(),
-                mSingleThreadedExecutor,
-                callback);
-        // Insert contacts to trigger delta update.
-        ContentResolver resolver = mContext.getContentResolver();
-        ContentValues dummyValues = new ContentValues();
-        for (int i = 0; i < docCount; i++) {
-            resolver.insert(ContactsContract.Contacts.CONTENT_URI, dummyValues);
-        }
+        verify(mockJobScheduler, never()).schedule(any());
+    }
 
-        try {
-            instance.startAsync();
+    @RequiresFlagsEnabled(Flags.FLAG_ENABLE_CHECK_CONTACTS_INDEXER_UPDATE_JOB_PARAMS)
+    @Test
+    public void
+    testCp2SyncFirstRun_subsequentRunWithNonMatchingScheduledJob_withCheck_schedulesJob()
+            throws Exception {
+        // Trigger an initial full update.
+        executeAndWaitForCompletion(
+                mInstance.doFullUpdateInternalAsync(new CancellationSignal(), mUpdateStats),
+                mSingleThreadedExecutor);
 
-            // Wait for all async tasks to complete
-            latch.await(30L, TimeUnit.SECONDS);
+        JobScheduler mockJobScheduler = mock(JobScheduler.class);
+        mContext.setJobScheduler(mockJobScheduler);
+        // Create matching JobInfo but with missing params
+        JobInfo fakeJobInfo = new JobInfo.Builder(PERIODIC_JOB_INFO)
+                .setExtras(new PersistableBundle())
+                .build();
+        // Simulate getPendingJob() returning a job with missing params
+        doReturn(fakeJobInfo)
+                .when(mockJobScheduler)
+                .getPendingJob(ContactsIndexerMaintenanceConfig.MIN_CONTACTS_INDEXER_JOB_ID
+                        + mContext.getUser().getIdentifier());
 
-            verify(mockJobScheduler, never()).schedule(any());
-        } finally {
-            instance.shutdown();
-        }
+        mInstance.doCp2SyncFirstRun();
+
+        ArgumentCaptor<JobInfo> jobInfoArgumentCaptor = ArgumentCaptor.forClass(JobInfo.class);
+        verify(mockJobScheduler).schedule(jobInfoArgumentCaptor.capture());
+        JobInfo fullUpdateJob = jobInfoArgumentCaptor.getValue();
+        assertThat(fullUpdateJob).isEqualTo(IMMEDIATE_JOB_INFO);
+    }
+
+    @RequiresFlagsDisabled(Flags.FLAG_ENABLE_CHECK_CONTACTS_INDEXER_UPDATE_JOB_PARAMS)
+    @Test
+    public void
+    testCp2SyncFirstRun_subsequentRunWithNonMatchingScheduledJob_withoutCheck_doesNotScheduleJob()
+            throws Exception {
+        // Trigger an initial full update.
+        executeAndWaitForCompletion(
+                mInstance.doFullUpdateInternalAsync(new CancellationSignal(), mUpdateStats),
+                mSingleThreadedExecutor);
+
+        JobScheduler mockJobScheduler = mock(JobScheduler.class);
+        mContext.setJobScheduler(mockJobScheduler);
+        // Create matching JobInfo but with missing params
+        JobInfo fakeJobInfo = new JobInfo.Builder(PERIODIC_JOB_INFO)
+                .setExtras(new PersistableBundle())
+                .build();
+        // Simulate getPendingJob() returning a job with missing params
+        doReturn(fakeJobInfo)
+                .when(mockJobScheduler)
+                .getPendingJob(ContactsIndexerMaintenanceConfig.MIN_CONTACTS_INDEXER_JOB_ID
+                        + mContext.getUser().getIdentifier());
+
+        mInstance.doCp2SyncFirstRun();
+
+        verify(mockJobScheduler, never()).schedule(any());
     }
 
     @Test
@@ -741,18 +758,13 @@ public class ContactsIndexerUserInstanceTest extends FakeContactsProviderTestBas
                 settingsBundle.getLong(ContactsIndexerSettings.LAST_CONTACT_DELETE_TIMESTAMP_KEY));
     }
 
+    // This test tests whether a full update job will be run to prune the person corpus when
+    // AppSearch reaches its max document limit. Since there are issues with obtaining the
+    // permissions to change the device config for max document limit, and we don't want to
+    // index 10000+ documents in this test, we simulate the out of space error by manually
+    // adding it to update stats beforehand.
     @Test
     public void testDeltaUpdate_outOfSpaceError_fullUpdateScheduled() throws Exception {
-        // This tests whether a full update job will be run to prune the person corpus when
-        // AppSearch reaches its max document limit. Since there are issues with obtaining the
-        // permissions to change the device config for max document limit, and we don't want to
-        // index 10000+ documents in this test, we simulate the out of space error by manually
-        // adding it to update stats beforehand.
-
-        // Cancel any existing jobs.
-        IndexerMaintenanceService.cancelUpdateJobIfScheduled(
-                mContext, mContext.getUser(), CONTACTS_INDEXER);
-
         JobScheduler mockJobScheduler = mock(JobScheduler.class);
         mContext.setJobScheduler(mockJobScheduler);
 
@@ -801,12 +813,14 @@ public class ContactsIndexerUserInstanceTest extends FakeContactsProviderTestBas
         // schedule a full update job.
         JobScheduler mockJobScheduler = mock(JobScheduler.class);
         mContext.setJobScheduler(mockJobScheduler);
+        // Initializes an AppSearchHelper
         mInstance = ContactsIndexerUserInstance.createInstance(mContext, mContactsDir,
                 mConfigForTest, mSingleThreadedExecutor);
         try {
             mInstance.startAsync();
-            verifyZeroInteractions(mockJobScheduler);
+            verifyNoMoreInteractions(mockJobScheduler);
         } finally {
+            // unregisters observers registered by startAsync()
             mInstance.shutdown();
         }
     }
@@ -872,6 +886,7 @@ public class ContactsIndexerUserInstanceTest extends FakeContactsProviderTestBas
         // doCp2SyncFirstRun again.
         JobScheduler mockJobScheduler = mock(JobScheduler.class);
         mContext.setJobScheduler(mockJobScheduler);
+        // Initializes an AppSearchHelper
         mInstance = ContactsIndexerUserInstance.createInstance(mContext, mContactsDir,
                 mConfigForTest, mSingleThreadedExecutor);
         try {
@@ -879,8 +894,158 @@ public class ContactsIndexerUserInstanceTest extends FakeContactsProviderTestBas
             latch.await(30L, TimeUnit.SECONDS);
             verify(mockJobScheduler).schedule(any());
         } finally {
+            // unregisters observers registered by startAsync()
             mInstance.shutdown();
         }
+    }
+
+    @RequiresFlagsEnabled(Flags.FLAG_ENABLE_CHECK_CONTACTS_INDEXER_DELTA_TIMESTAMPS)
+    @Test
+    public void testDeltaUpdate_inconsistentTimestamps_withDeltaTimestampCheck() throws Exception {
+        // Insert and delete future contacts
+        mFakeContactsProvider.setContactUpdatedTimestampOffsetMs(TimeUnit.DAYS.toMillis(1));
+        ContentResolver resolver = mContext.getContentResolver();
+        ContentValues dummyValues = new ContentValues();
+        for (int i = 0; i < 10; i++) {
+            resolver.insert(ContactsContract.Contacts.CONTENT_URI, dummyValues);
+        }
+        resolver.delete(ContentUris.withAppendedId(ContactsContract.Contacts.CONTENT_URI, 2),
+                /*extras=*/ null);
+        resolver.delete(ContentUris.withAppendedId(ContactsContract.Contacts.CONTENT_URI, 3),
+                /*extras=*/ null);
+
+        executeAndWaitForCompletion(
+                mInstance.doDeltaUpdateAsync(ContactsProviderUtil.UPDATE_LIMIT_NONE,
+                        mUpdateStats),
+                mSingleThreadedExecutor);
+
+        // Verify future contacts were indexed
+        AppSearchHelper searchHelper =
+                AppSearchHelper.createAppSearchHelper(mContext, mSingleThreadedExecutor);
+        List<String> contactIds = searchHelper.getAllContactIdsAsync().get();
+        assertThat(contactIds.size()).isEqualTo(8);
+
+        // Verify saved delta timestamps were not updated since the contacts were in the future
+        ContactsIndexerSettings settings = mInstance.getSettings();
+        assertThat(settings.getLastContactUpdateTimestampMillis()).isEqualTo(0);
+        assertThat(settings.getLastContactDeleteTimestampMillis()).isEqualTo(0);
+
+        // Spoof the delta timestamps to be in the future
+        settings.setLastContactUpdateTimestampMillis(
+                System.currentTimeMillis() + TimeUnit.DAYS.toMillis(1));
+        settings.setLastContactDeleteTimestampMillis(
+                System.currentTimeMillis() + TimeUnit.DAYS.toMillis(1));
+
+        // Insert and delete contacts in the present
+        mFakeContactsProvider.setContactUpdatedTimestampOffsetMs(0);
+        for (int i = 0; i < 10; i++) {
+            resolver.insert(ContactsContract.Contacts.CONTENT_URI, dummyValues);
+        }
+        resolver.delete(ContentUris.withAppendedId(ContactsContract.Contacts.CONTENT_URI, 5),
+                /*extras=*/ null);
+        resolver.delete(ContentUris.withAppendedId(ContactsContract.Contacts.CONTENT_URI, 7),
+                /*extras=*/ null);
+        long presentUpdateTimestamp =
+                mFakeContactsProvider.getMostRecentContactUpdateTimestampMillis();
+        long presentDeleteTimestamp =
+                mFakeContactsProvider.getMostRecentDeletedContactTimestampMillis();
+        // Verify timestamps are not in the future
+        assertThat(presentUpdateTimestamp).isAtMost(System.currentTimeMillis());
+        assertThat(presentDeleteTimestamp).isAtMost(System.currentTimeMillis());
+
+        JobScheduler mockJobScheduler = mock(JobScheduler.class);
+        mContext.setJobScheduler(mockJobScheduler);
+
+        mUpdateStats.clear();
+        executeAndWaitForCompletion(
+                mInstance.doDeltaUpdateAsync(ContactsProviderUtil.UPDATE_LIMIT_NONE,
+                        mUpdateStats),
+                mSingleThreadedExecutor);
+
+        // Verify contacts were indexed
+        contactIds = searchHelper.getAllContactIdsAsync().get();
+        assertThat(contactIds.size()).isEqualTo(16);
+
+        // Verify the deltas timestamps were updated to the present timestamps
+        assertThat(settings.getLastContactUpdateTimestampMillis()).isEqualTo(
+                presentUpdateTimestamp);
+        assertThat(settings.getLastContactDeleteTimestampMillis()).isEqualTo(
+                presentDeleteTimestamp);
+
+        // Verify the full update job was scheduled due to inconsistent timestamps
+        verify(mockJobScheduler).schedule(any());
+    }
+
+    @RequiresFlagsDisabled(Flags.FLAG_ENABLE_CHECK_CONTACTS_INDEXER_DELTA_TIMESTAMPS)
+    @Test
+    public void testDeltaUpdate_inconsistentTimestamps_withoutDeltaTimestampCheck()
+            throws Exception {
+        long startTimeMillis = System.currentTimeMillis();
+
+        // Insert and delete future contacts
+        mFakeContactsProvider.setContactUpdatedTimestampOffsetMs(TimeUnit.DAYS.toMillis(1));
+        ContentResolver resolver = mContext.getContentResolver();
+        ContentValues dummyValues = new ContentValues();
+        for (int i = 0; i < 10; i++) {
+            resolver.insert(ContactsContract.Contacts.CONTENT_URI, dummyValues);
+        }
+        resolver.delete(ContentUris.withAppendedId(ContactsContract.Contacts.CONTENT_URI, 2),
+                /*extras=*/ null);
+        resolver.delete(ContentUris.withAppendedId(ContactsContract.Contacts.CONTENT_URI, 3),
+                /*extras=*/ null);
+        long futureUpdateTimestamp =
+                mFakeContactsProvider.getMostRecentContactUpdateTimestampMillis();
+        long futureDeleteTimestamp =
+                mFakeContactsProvider.getMostRecentDeletedContactTimestampMillis();
+        // Verify timestamps are in the future
+        assertThat(futureUpdateTimestamp).isAtLeast(startTimeMillis + TimeUnit.DAYS.toMillis(1));
+        assertThat(futureDeleteTimestamp).isAtLeast(startTimeMillis + TimeUnit.DAYS.toMillis(1));
+
+        executeAndWaitForCompletion(
+                mInstance.doDeltaUpdateAsync(ContactsProviderUtil.UPDATE_LIMIT_NONE,
+                        mUpdateStats),
+                mSingleThreadedExecutor);
+
+        // Verify future contacts were indexed
+        AppSearchHelper searchHelper =
+                AppSearchHelper.createAppSearchHelper(mContext, mSingleThreadedExecutor);
+        List<String> contactIds = searchHelper.getAllContactIdsAsync().get();
+        assertThat(contactIds.size()).isEqualTo(8);
+
+        // Verify saved delta timestamps match those of the future contacts
+        ContactsIndexerSettings settings = mInstance.getSettings();
+        assertThat(settings.getLastContactUpdateTimestampMillis()).isEqualTo(futureUpdateTimestamp);
+        assertThat(settings.getLastContactDeleteTimestampMillis()).isEqualTo(futureDeleteTimestamp);
+
+        // Insert and delete contacts in the present
+        mFakeContactsProvider.setContactUpdatedTimestampOffsetMs(0);
+        for (int i = 0; i < 10; i++) {
+            resolver.insert(ContactsContract.Contacts.CONTENT_URI, dummyValues);
+        }
+        resolver.delete(ContentUris.withAppendedId(ContactsContract.Contacts.CONTENT_URI, 5),
+                /*extras=*/ null);
+        resolver.delete(ContentUris.withAppendedId(ContactsContract.Contacts.CONTENT_URI, 7),
+                /*extras=*/ null);
+
+        JobScheduler mockJobScheduler = mock(JobScheduler.class);
+        mContext.setJobScheduler(mockJobScheduler);
+
+        mUpdateStats.clear();
+        executeAndWaitForCompletion(
+                mInstance.doDeltaUpdateAsync(ContactsProviderUtil.UPDATE_LIMIT_NONE,
+                        mUpdateStats),
+                mSingleThreadedExecutor);
+
+        // Verify contacts were not indexed
+        contactIds = searchHelper.getAllContactIdsAsync().get();
+        assertThat(contactIds.size()).isEqualTo(8);
+
+        // Verify the delta timestamps did not change
+        assertThat(settings.getLastContactUpdateTimestampMillis()).isEqualTo(futureUpdateTimestamp);
+        assertThat(settings.getLastContactDeleteTimestampMillis()).isEqualTo(futureDeleteTimestamp);
+
+        // Verify no full update job was scheduled
+        verifyNoMoreInteractions(mockJobScheduler);
     }
 
     @Test

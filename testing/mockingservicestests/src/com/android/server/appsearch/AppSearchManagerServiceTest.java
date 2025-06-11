@@ -31,6 +31,8 @@ import static com.android.server.appsearch.FrameworkServiceAppSearchConfig.KEY_R
 
 import static com.google.common.truth.Truth.assertThat;
 
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assume.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -94,9 +96,11 @@ import android.app.appsearch.aidl.SearchSuggestionAidlRequest;
 import android.app.appsearch.aidl.SetSchemaAidlRequest;
 import android.app.appsearch.aidl.UnregisterObserverCallbackAidlRequest;
 import android.app.appsearch.aidl.WriteSearchResultsToFileAidlRequest;
+import android.app.appsearch.exceptions.AppSearchException;
 import android.app.appsearch.observer.ObserverSpec;
 import android.app.appsearch.safeparcel.GenericDocumentParcel;
 import android.app.appsearch.stats.SchemaMigrationStats;
+import android.app.appsearch.testutil.AppSearchTestUtils;
 import android.app.role.RoleManager;
 import android.content.AttributionSource;
 import android.content.BroadcastReceiver;
@@ -111,11 +115,8 @@ import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.SystemClock;
 import android.os.UserHandle;
-import android.os.UserManager;
 import android.platform.test.annotations.RequiresFlagsDisabled;
 import android.platform.test.annotations.RequiresFlagsEnabled;
-import android.platform.test.flag.junit.CheckFlagsRule;
-import android.platform.test.flag.junit.DeviceFlagsValueProvider;
 import android.provider.DeviceConfig;
 
 import androidx.test.core.app.ApplicationProvider;
@@ -135,16 +136,18 @@ import com.android.server.appsearch.external.localstorage.stats.SearchStats;
 import com.android.server.appsearch.external.localstorage.stats.SetSchemaStats;
 import com.android.server.appsearch.external.localstorage.usagereporting.ClickActionGenericDocument;
 import com.android.server.appsearch.external.localstorage.usagereporting.SearchActionGenericDocument;
+import com.android.server.appsearch.isolated_storage_service.IsolatedStorageServiceManager;
 import com.android.server.usage.StorageStatsManagerLocal;
 
-import libcore.io.IoBridge;
-
 import com.google.common.util.concurrent.SettableFuture;
+
+import libcore.io.IoBridge;
 
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.RuleChain;
 import org.junit.rules.TemporaryFolder;
 import org.mockito.ArgumentCaptor;
 
@@ -168,8 +171,7 @@ public class AppSearchManagerServiceTest {
     private final RoleManager mRoleManager = mock(RoleManager.class);
     private final DevicePolicyManager mDevicePolicyManager = mock(DevicePolicyManager.class);
 
-    @Rule
-    public final CheckFlagsRule mCheckFlagsRule = DeviceFlagsValueProvider.createCheckFlagsRule();
+    @Rule public final RuleChain mRuleChain = AppSearchTestUtils.createCommonTestRules();
 
     @Rule
     public ExtendedMockitoRule mExtendedMockitoRule = new ExtendedMockitoRule.Builder()
@@ -179,7 +181,7 @@ public class AppSearchManagerServiceTest {
     @Rule
     public TemporaryFolder mTemporaryFolder = new TemporaryFolder();
 
-    private Context mContext;
+    private TestContext mContext;
     private AppSearchManagerService mAppSearchManagerService;
     private UserHandle mUserHandle;
     private UiAutomation mUiAutomation;
@@ -194,49 +196,8 @@ public class AppSearchManagerServiceTest {
         Context context = ApplicationProvider.getApplicationContext();
         mUserHandle = context.getUser();
         mUiAutomation = InstrumentationRegistry.getInstrumentation().getUiAutomation();
-        mContext = new ContextWrapper(context) {
-            // Mock-able package manager for testing
-            final PackageManager mPackageManager = spy(context.getPackageManager());
-            final UserManager mUserManager = spy(context.getSystemService(UserManager.class));
-
-            @Override
-            public Intent registerReceiverForAllUsers(@Nullable BroadcastReceiver receiver,
-                    @NonNull IntentFilter filter, @Nullable String broadcastPermission,
-                    @Nullable Handler scheduler) {
-                // Do nothing
-                return null;
-            }
-
-            @Override
-            public Context createContextAsUser(UserHandle user, int flags) {
-                return new ContextWrapper(super.createContextAsUser(user, flags)) {
-                    @Override
-                    public PackageManager getPackageManager() {
-                        return mPackageManager;
-                    }
-                };
-            }
-
-            @Override
-            public PackageManager getPackageManager() {
-                return mPackageManager;
-            }
-
-            @Nullable
-            @Override
-            public Object getSystemService(String name) {
-                if (Context.ROLE_SERVICE.equals(name)) {
-                    return mRoleManager;
-                }
-                if (Context.DEVICE_POLICY_SERVICE.equals(name)) {
-                    return mDevicePolicyManager;
-                }
-                if (Context.USER_SERVICE.equals(name)) {
-                    return mUserManager;
-                }
-                return super.getSystemService(name);
-            }
-        };
+        final boolean useIsolatedStorage = false;
+        mContext = new TestContext(context, mRoleManager, mDevicePolicyManager, useIsolatedStorage);
 
         // Set a test environment that provides a temporary folder for AppSearch
         File mAppSearchDir = mTemporaryFolder.newFolder();
@@ -1005,30 +966,17 @@ public class AppSearchManagerServiceTest {
         verifyLocalCallsResults(RESULT_DENIED);
         verifyGlobalCallsResults(AppSearchResult.RESULT_OK);
 
-        // Add mocking to spy'd package manager to return current uid for package foo
-        // This is necessary to pass call verification using a different package name
-        PackageManager spyPackageManager = mContext.getPackageManager();
+        // Mock the package manager to return current uid for package foo; this is necessary to pass
+        // call verification using a different package name
+        PackageManager spyPackageManager = spy(mContext.getPackageManager());
         int uid = AppSearchAttributionSource.createAttributionSource(mContext,
                 mCallingPid).getUid();
         doReturn(uid).when(spyPackageManager).getPackageUid(FOO_PACKAGE_NAME, /* flags= */ 0);
         // Specifically grant permission for report system usage to package foo
         doReturn(PackageManager.PERMISSION_GRANTED).when(spyPackageManager).checkPermission(
                 READ_GLOBAL_APP_SEARCH_DATA, FOO_PACKAGE_NAME);
-
-        // Change the calling package name used in the helper methods indirectly through a newly
-        // wrapped context
-        Context context = ApplicationProvider.getApplicationContext();
-        mContext = new ContextWrapper(context) {
-            @Override
-            public String getPackageName() {
-                return FOO_PACKAGE_NAME;
-            }
-
-            @Override
-            public AttributionSource getAttributionSource() {
-                return super.getAttributionSource().withPackageName(FOO_PACKAGE_NAME);
-            }
-        };
+        mContext.mPackageManager = spyPackageManager;
+        mContext.mPackageName = FOO_PACKAGE_NAME;
 
         // Confirm that we're using a different package name
         assertThat(mContext.getPackageName()).isEqualTo(FOO_PACKAGE_NAME);
@@ -1291,7 +1239,7 @@ public class AppSearchManagerServiceTest {
                 false);
         DeviceConfig.setProperty(DeviceConfig.NAMESPACE_APPSEARCH,
                 KEY_RATE_LIMIT_API_COSTS,
-                "localSearch:6;localSetSchema:9;localGetSchema:15",
+                "localSearch:3;localSetSchema:9;localGetSchema:15",
                 false);
         verifySetSchemaResult(RESULT_RATE_LIMITED);
         verifyLocalGetSchemaResult(RESULT_RATE_LIMITED);
@@ -1506,6 +1454,26 @@ public class AppSearchManagerServiceTest {
                 /* isForEnterprise= */ true));
         // No CallStats logged since we returned early
         verify(mLogger, timeout(1000).times(0)).logStats(any(CallStats.class));
+    }
+
+    @Test
+    public void testIsolatedStorageNotAvailable() throws Exception {
+        assumeTrue(IsolatedStorageServiceManager.isolatedStorageFlagsSet());
+        // Ensure that AppSearch fails if the isolated storage service fails
+        final boolean useIsolatedStorage = true;
+        Context context = ApplicationProvider.getApplicationContext();
+        // Create a new user, one was already created during setUp()
+        UserHandle testUserHandle = new UserHandle(1);
+        ServiceAppSearchConfig appSearchConfig =
+                FrameworkServiceAppSearchConfig.create(DIRECT_EXECUTOR);
+        TestContext testContext =
+                new TestContext(context, mRoleManager, mDevicePolicyManager, useIsolatedStorage);
+        assertThrows(
+                AppSearchException.class,
+                () -> {
+                    AppSearchUserInstanceManager.getInstance()
+                            .getOrCreateUserInstance(testContext, testUserHandle, appSearchConfig);
+                });
     }
 
     private void verifyLocalCallsResults(int resultCode) throws Exception {
@@ -1955,6 +1923,82 @@ public class AppSearchManagerServiceTest {
         public void tearDown() {
         }
     }
+
+    private static final class TestContext extends ContextWrapper {
+        private final RoleManager mRoleManager;
+        private final DevicePolicyManager mDevicePolicyManager;
+        private final boolean mUseIsolatedStorage;
+
+        @Nullable private PackageManager mPackageManager;
+        @Nullable private String mPackageName;
+
+        TestContext(
+                Context base,
+                RoleManager roleManager,
+                DevicePolicyManager devicePolicyManager,
+                boolean useIsolatedStorage) {
+            super(base);
+            mRoleManager = roleManager;
+            mDevicePolicyManager = devicePolicyManager;
+            mUseIsolatedStorage = useIsolatedStorage;
+        }
+
+        @Override
+        public Intent registerReceiverForAllUsers(@Nullable BroadcastReceiver receiver,
+                @NonNull IntentFilter filter, @Nullable String broadcastPermission,
+                @Nullable Handler scheduler) {
+            // Do nothing
+            return null;
+        }
+
+        @Override
+        public Context createContextAsUser(UserHandle user, int flags) {
+            return this;
+        }
+
+        @Override
+        public PackageManager getPackageManager() {
+            if (mPackageManager != null) {
+                return mPackageManager;
+            }
+            return super.getPackageManager();
+        }
+
+        @Override
+        public String getPackageName() {
+            if (mPackageName != null) {
+                return mPackageName;
+            }
+            return super.getPackageName();
+        }
+
+        @Override
+        public AttributionSource getAttributionSource() {
+            if (mPackageName != null) {
+                return super.getAttributionSource().withPackageName(mPackageName);
+            }
+            return super.getAttributionSource();
+        }
+
+        @Nullable
+        @Override
+        public Object getSystemService(String name) {
+            if (Context.ROLE_SERVICE.equals(name)) {
+                return mRoleManager;
+            }
+            if (Context.DEVICE_POLICY_SERVICE.equals(name)) {
+                return mDevicePolicyManager;
+            }
+            /* TODO (b/399479359)
+             * Force use of native icing for AppSearchManagerServiceTests, which mocks
+             * servives and does have the isolated storage service
+             */
+            if (Context.VIRTUALIZATION_SERVICE.equals(name) && !mUseIsolatedStorage) {
+                return null;
+            }
+            return super.getSystemService(name);
+        }
+    };
 
     private static final class TestResultCallback extends IAppSearchResultCallback.Stub {
         private final SettableFuture<AppSearchResult<?>> future = SettableFuture.create();

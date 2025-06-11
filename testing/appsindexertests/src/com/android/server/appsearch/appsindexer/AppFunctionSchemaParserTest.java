@@ -15,15 +15,18 @@
  */
 package com.android.server.appsearch.appsindexer;
 
+import static com.android.server.appsearch.appsindexer.TestUtils.APP_FUNCTION_STATIC_METADATA_PARENT_PROPERTIES;
+
 import static com.google.common.truth.Truth.assertThat;
 
+import static org.junit.Assume.assumeTrue;
 import static org.mockito.Mockito.when;
 
 import android.app.appsearch.AppSearchSchema;
+import android.app.appsearch.AppSearchSchema.BooleanPropertyConfig;
+import android.app.appsearch.AppSearchSchema.LongPropertyConfig;
 import android.app.appsearch.AppSearchSchema.PropertyConfig;
 import android.app.appsearch.AppSearchSchema.StringPropertyConfig;
-import android.app.appsearch.AppSearchSchema.LongPropertyConfig;
-import android.app.appsearch.AppSearchSchema.BooleanPropertyConfig;
 import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
 import android.content.res.Resources;
@@ -39,7 +42,6 @@ import org.mockito.junit.MockitoJUnitRunner;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.List;
 import java.util.Map;
 
 @RunWith(MockitoJUnitRunner.class)
@@ -63,10 +65,12 @@ public class AppFunctionSchemaParserTest {
     }
 
     @Test
-    public void parse_singleType_withNoAttributes() throws Exception {
+    public void parse_singleType_withNoAttributesForAdditionalProperties() throws Exception {
+        assumeTrue(AppFunctionStaticMetadata.shouldSetParentType());
         String xsd =
                 "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">"
                         + "    <xs:documentType name=\"AppFunctionStaticMetadata\">"
+                        + APP_FUNCTION_STATIC_METADATA_PARENT_PROPERTIES
                         + "        <xs:element name=\"name\" type=\"xs:string\" />"
                         + "        <xs:element name=\"age\" type=\"xs:int\" />"
                         + "        <xs:element name=\"isActive\" type=\"xs:boolean\" />"
@@ -81,7 +85,10 @@ public class AppFunctionSchemaParserTest {
         assertThat(schemas).hasSize(1);
         assertThat(schemas.get("AppFunctionStaticMetadata-com.example.app"))
                 .isEqualTo(
-                        new AppSearchSchema.Builder("AppFunctionStaticMetadata-com.example.app")
+                        new AppSearchSchema.Builder(
+                                        AppFunctionStaticMetadata.PARENT_TYPE_APPSEARCH_SCHEMA)
+                                .setSchemaType("AppFunctionStaticMetadata-com.example.app")
+                                .addParentType("AppFunctionStaticMetadata")
                                 .addProperty(new StringPropertyConfig.Builder("name").build())
                                 .addProperty(new LongPropertyConfig.Builder("age").build())
                                 .addProperty(new BooleanPropertyConfig.Builder("isActive").build())
@@ -89,10 +96,12 @@ public class AppFunctionSchemaParserTest {
     }
 
     @Test
-    public void parse_singleType_withAttributes() throws Exception {
+    public void parse_singleType_withAttributesForAdditionalProperties() throws Exception {
+        assumeTrue(AppFunctionStaticMetadata.shouldSetParentType());
         String xsd =
                 "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">"
                         + "    <xs:documentType name=\"AppFunctionStaticMetadata\">"
+                        + APP_FUNCTION_STATIC_METADATA_PARENT_PROPERTIES
                         + "        <xs:element name=\"name\" type=\"xs:string\" indexingType=\""
                         + StringPropertyConfig.INDEXING_TYPE_EXACT_TERMS
                         + "\" tokenizerType=\""
@@ -117,7 +126,10 @@ public class AppFunctionSchemaParserTest {
         assertThat(schemas).hasSize(1);
         assertThat(schemas.get("AppFunctionStaticMetadata-com.example.app"))
                 .isEqualTo(
-                        new AppSearchSchema.Builder("AppFunctionStaticMetadata-com.example.app")
+                        new AppSearchSchema.Builder(
+                                        AppFunctionStaticMetadata.PARENT_TYPE_APPSEARCH_SCHEMA)
+                                .setSchemaType("AppFunctionStaticMetadata-com.example.app")
+                                .addParentType("AppFunctionStaticMetadata")
                                 .addProperty(
                                         new StringPropertyConfig.Builder("name")
                                                 .setIndexingType(
@@ -144,9 +156,11 @@ public class AppFunctionSchemaParserTest {
 
     @Test
     public void parse_multipleNestedTypes() throws Exception {
+        assumeTrue(AppFunctionStaticMetadata.shouldSetParentType());
         String xsd =
                 "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">"
                         + "    <xs:documentType name=\"AppFunctionStaticMetadata\">"
+                        + APP_FUNCTION_STATIC_METADATA_PARENT_PROPERTIES
                         + "        <xs:element name=\"inner\" type=\"appfn:InnerType\" />"
                         + "    </xs:documentType>"
                         + "    <xs:documentType name=\"InnerType\">"
@@ -167,11 +181,14 @@ public class AppFunctionSchemaParserTest {
                                 .build());
         assertThat(schemas.get("AppFunctionStaticMetadata-com.example.app"))
                 .isEqualTo(
-                        new AppSearchSchema.Builder("AppFunctionStaticMetadata-com.example.app")
+                        new AppSearchSchema.Builder(
+                                        AppFunctionStaticMetadata.PARENT_TYPE_APPSEARCH_SCHEMA)
+                                .setSchemaType("AppFunctionStaticMetadata-com.example.app")
+                                .addParentType("AppFunctionStaticMetadata")
                                 .addProperty(
                                         new AppSearchSchema.DocumentPropertyConfig.Builder(
                                                         "inner", "InnerType-com.example.app")
-                                                .setShouldIndexNestedProperties(true)
+                                                .setShouldIndexNestedProperties(false)
                                                 .build())
                                 .build());
     }
@@ -180,7 +197,8 @@ public class AppFunctionSchemaParserTest {
     public void parse_exceedMaxAllowedDocumentTypes() throws Exception {
         String xsd =
                 "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">"
-                        + "    <xs:documentType name=\"OuterType\">"
+                        + "    <xs:documentType name=\"AppFunctionStaticMetadata\">"
+                        + APP_FUNCTION_STATIC_METADATA_PARENT_PROPERTIES
                         + "        <xs:element name=\"inner\" type=\"appfn:InnerType\" />"
                         + "    </xs:documentType>"
                         + "    <xs:documentType name=\"InnerType\">"
@@ -203,6 +221,7 @@ public class AppFunctionSchemaParserTest {
         String xsd =
                 "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">"
                         + "    <xs:documentType name=\"AppFunctionStaticMetadata\">"
+                        + APP_FUNCTION_STATIC_METADATA_PARENT_PROPERTIES
                         + "        <xs:element name=\"name\" type=\"xs:unsupportedType\" />"
                         + "    </xs:documentType>"
                         + "</xs:schema>";
@@ -219,7 +238,65 @@ public class AppFunctionSchemaParserTest {
         String xsd =
                 "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">"
                         + "    <xs:documentType name=\"TestType\">"
-                        + "        <xs:element name=\"name\" type=\"xs:unsupportedType\" />"
+                        + "        <xs:element name=\"name\" type=\"xs:string\" />"
+                        + "    </xs:documentType>"
+                        + "</xs:schema>";
+        setXmlInput(xsd);
+
+        Map<String, AppSearchSchema> schemas =
+                mParser.parseAndCreateSchemas(
+                        mPackageManager, TEST_PACKAGE_NAME, TEST_XML_ASSET_FILE_PATH);
+        assertThat(schemas).isEmpty();
+    }
+
+    @Test
+    public void parse_missingNestedSchemaDefinition_returnsEmptyMap() throws Exception {
+        String xsd =
+                "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">"
+                        + "    <xs:documentType name=\"AppFunctionStaticMetadata\">"
+                        + APP_FUNCTION_STATIC_METADATA_PARENT_PROPERTIES
+                        + "        <xs:element name=\"name\" type=\"appfn:InnerType\" />"
+                        + "    </xs:documentType>"
+                        + "</xs:schema>";
+        setXmlInput(xsd);
+
+        Map<String, AppSearchSchema> schemas =
+                mParser.parseAndCreateSchemas(
+                        mPackageManager, TEST_PACKAGE_NAME, TEST_XML_ASSET_FILE_PATH);
+        assertThat(schemas).isEmpty();
+    }
+
+    @Test
+    public void parse_nonAlphaNumericPropertyName_returnsEmptyMap() throws Exception {
+        String xsd =
+                "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">"
+                        + "    <xs:documentType name=\"AppFunctionStaticMetadata\">"
+                        + APP_FUNCTION_STATIC_METADATA_PARENT_PROPERTIES
+                        + "        <xs:element name=\"name_property\" type=\"xs:string\" />"
+                        + "    </xs:documentType>"
+                        + "</xs:schema>";
+        setXmlInput(xsd);
+
+        Map<String, AppSearchSchema> schemas =
+                mParser.parseAndCreateSchemas(
+                        mPackageManager, TEST_PACKAGE_NAME, TEST_XML_ASSET_FILE_PATH);
+        assertThat(schemas).isEmpty();
+    }
+
+    @Test
+    public void parse_invalidAttributeValue_returnsEmptyMap() throws Exception {
+        // Invalid value for cardinality attribute.
+        String xsd =
+                "<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">"
+                        + "    <xs:documentType name=\"AppFunctionStaticMetadata\">"
+                        + APP_FUNCTION_STATIC_METADATA_PARENT_PROPERTIES
+                        + "        <xs:element name=\"nameProperty\" type=\"xs:string\" "
+                        + " cardinality=\"foo\""
+                        + "/>"
+                        + "        <xs:element name=\"inner\" type=\"appfn:InnerType\" />"
+                        + "    </xs:documentType>"
+                        + "    <xs:documentType name=\"InnerType\">"
+                        + "        <xs:element name=\"value\" type=\"xs:string\" />"
                         + "    </xs:documentType>"
                         + "</xs:schema>";
         setXmlInput(xsd);
